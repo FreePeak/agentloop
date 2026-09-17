@@ -1,6 +1,6 @@
 # agentloop — Product Requirements Document
 
-**Status:** draft for review · **Version:** 0.5.0 · **Date:** 2026-09-18
+**Status:** draft for review · **Version:** 0.6.0 · **Date:** 2026-09-18
 **Repo:** `github.com/FreePeak/agentloop` (branch `docs/prd-agentloop-service`, no commits yet)
 **Canonical architecture:** [`design.md`](../design.md) — this PRD is the status/scope SoT and summarizes its decisions; it never duplicates its detail.
 
@@ -451,7 +451,9 @@ What survives the discount, and why the playbook was applied at all: the loop-le
 
 ---
 
-*Last updated: 2026-09-18 (v0.5.0 loop 4 — every row of the defaults table now names its chapter or number, the two genuinely non-book rows say so, and §19 (Appendix C) sets out the App. G template library as v2: per-template steps/tools/budget from the book, the trigger to add each, and the loop we would build — plus the three observations (3–5 tools, 5–12 steps, confirmation on the irreversible tool) that justify §4's five and §7.3's fail-closed policy table.
+*Last updated: 2026-09-18 (v0.6.0 loop 5 — §20 (Appendix D) accounts for all 100 of the book's patterns: 54 adopted with the milestone that tests them, 29 deferred with a named adoption trigger, 17 rejected for now with a reason. No silent omissions.
+
+*v0.5.0 loop 4 — every row of the defaults table now names its chapter or number, the two genuinely non-book rows say so, and §19 (Appendix C) sets out the App. G template library as v2: per-template steps/tools/budget from the book, the trigger to add each, and the loop we would build — plus the three observations (3–5 tools, 5–12 steps, confirmation on the irreversible tool) that justify §4's five and §7.3's fail-closed policy table.
 
 *v0.4.0 loop 3 — the book's closing sections are now applied, not just cited: §13.1 maps all twelve "moves that carry the book" to a milestone and a test, the production checklist sits next to the goals, M1's acceptance names P1/P75 as its definition, and six cheap-but-premature patterns (P74, P49/P55, P78, P79, P88, P90) are listed as deliberately not built, each with its trigger.
 
@@ -475,5 +477,48 @@ The book ships eight copy-paste architectures in App. G. They are **not** a v1 d
 | 8 · Multi-Agent Supervisor | 12 / $2.00 total, per-specialist models | 3 | never before §10's gate | delegate → collect → synthesize; blocked until M7 |
 
 Three observations that shaped §17's defaults rather than being copied from the table. The book's eight templates use **3–5 tools** — the same band as §4's five, which is the strongest single argument that a five-tool v1 is not under-scoped. Their **step budgets run 5–12** around our 9, so `max_steps: 9` sits inside the shape rather than under it. And every template that can write carries `requires_confirmation` on exactly the irreversible tool (`create_event`, `create_incident`) — which is §7.3's policy table derived from the book's own examples rather than from taste, and is why that table is fail-closed on unknown tools instead of permissive.
+
+## 20. Appendix D — the pattern ledger (App. B, 100 patterns)
+
+App. B is the book's index of 100 patterns across seven bands, and two of them carry an unconditional "when to use": **1 Bounded Loop** (*every production agent*) and **75 Kill Switch** (*every production system*). Both are M1's definition (§13). Everything else is conditional — which is exactly why the ledger below exists: it is the difference between *not adopted* and *forgotten*, and it gives a reviewer a defensible answer for why the v1 loop is not 100 patterns wide.
+
+### Adopted in v1 (54 patterns)
+
+Grouped by what they protect, each one pointing at where it is tested:
+
+| Group | Patterns | Where it lives |
+|---|---|---|
+| The two that are mandatory | **P1** Bounded Loop, **P75** Kill Switch | M1 definition; `kill` tested every deploy and quarterly (§13) |
+| Loop exits and shape | P2 Early Exit, P3 Cost Circuit Breaker, P4 Convergence Check, P5 Oscillation Detector, P8 Checkpoint Loop, P11 Parallel Loop, P12 Conditional Loop, P15 Adaptive Step Limit | `LoopRunner` guard set + `ExitReason` (§9); P11 fans out reads only |
+| Tool contract | P16 Tool Router, P17 Tool Fallback, P19 Tool Validation, P20 Tool Caching, P21 Tool Rate Limiter, P22 Tool Sandboxing, P23 Tool Discovery, P24 Tool Doc Injection, P26 Idempotent Tools, P28 Tool Health Check, P29 Tool Result Summarization, P30 Confirmation Tool | `ToolRegistry` (§4) — five tools, full contract |
+| Memory and state | P31 Sliding Window, P32 Landmark Memory, P33 Semantic Recall, P34 Memory Compression, P39 Context Budget, P40 Memory Eviction, P42 Memory Versioning, P43 Structured State, P45 Rollback State | four tiers + 70% rule + landmarks (M4); P33 via LeanKG |
+| Verification | P61 Self-Critique (capped 2), P62 Rubric Scoring, P64 Citation Verification, P65 Output Validation, P68 Confidence Scoring | the evaluate phase and the eval suite (§11) |
+| Cost | P76 Model Tiering, P81 Streaming Response, P82 Token Budget, P83 Cost Alerting | onegw combos + `BudgetGuard` + alerts (§12) |
+| Operator surface | P91 Progressive Disclosure, P92 Status Updates, P94 Explanation Mode, P99 Feedback Loop, P100 Graceful Handoff | the console and the escalate path (§6, §7.5) |
+| Single-agent boundary | P46 Supervisor (as *the* agent, not a second layer), P68, P20 | §10 — one agent, patterns applied inside it |
+
+### Deliberately deferred — adoption trigger named (29 patterns)
+
+| Pattern | Why not now | Trigger |
+|---|---|---|
+| P6 Backoff Loop, P13 Warmup Loop, P14 Cooldown Loop | the retry ladder and tier routing already cover the cases we have | a measured error class the ladder mishandles |
+| P7 Priority Loop, P9 Timeout Guard, P10 Nested Loop | single-workload v1; per-tool timeouts exist, sub-task budgets do not | first multi-difficulty queue; first decomposed sub-budget |
+| P18 Tool Composition | the planner already sequences tools better than a static pipeline | a predictable 3+ tool sequence repeated across runs |
+| P25 Read-Only First, P27 Tool Versioning, P35 Episodic Memory, P36 Working Memory Buffer | `write_file` is approval-gated and twin'd with `repo_context`; five tools do not need version negotiation | a breaking tool change; the first recurring task family |
+| P37 Preference Store, P38 Fact Cache | needs real multi-user traffic to be worth storage | first repeat tenant with stable facts |
+| P41 Shared Memory, P44 State Validation | single agent; typed state already validated at the boundary | M7, and the first corrupted-state incident |
+| P47–P60 (multi-agent band) | §10's gate is shut on purpose | 10+ tools, mixed tiers, genuine parallelism, or context beyond one window |
+| P63 Adversarial Check, P67 Consistency Check | the adversarial **eval category** covers this at suite level | a wrong answer that a second model pass would have caught |
+| P66 Guardrails, P69 Bias Detection, P70 PII Scrubbing, P71 Audit Log | partly in place (audit log is M1, redaction-by-rollback is §7.4); blocklists wait for a public-facing path | a public surface, or the first PII incident |
+| P72 Rate-of-Change Guard, P73 Dry Run | approval gates cover the irreversible writes we have | a write tool that mutates in bulk |
+| P77 Prompt Compression, P80 Lazy Evaluation, P84 Prompt Template Reuse | onegw's savers own prompt compression; template reuse is Appendix C's job once templates exist | template count > 3 |
+| P85 Response Truncation, P86 Parallel Tool Calls, P87 Prefetch, P89 Resource Pooling | one tool call per ReAct turn, capped results, no connection pressure yet | a measured latency or pooling problem |
+| P93 Undo Support, P95 Preference Learning, P96 Multimodal Output, P97 Context Persistence, P98 Error Translation | the console translates errors; the rest need a product surface | first create/modify tool, or the first cross-session workflow |
+
+### Not adopted (17 patterns)
+
+Multi-agent band rows not deferred so much as **rejected on merit until the gate opens**: P48 Debate, P49 Ensemble, P50 Specialist Routing, P51 Reviewer-Writer, P52 Hierarchical Delegation, P53 Blackboard, P54 Auction, P55 Consensus, P56 Agent Pool, P57 Agent Lifecycle, P58 Message Bus, P59 Role Rotation. The book's own worked example says *start with 2–3 agents, not 10*, and our gate (§10) is stricter still: M7 is conditional, and P49 (3–5 agents voting at 3–5× compute) and P55 (majority approval on irreversible decisions) each need an eval to justify their price. Our irreversible decisions go to a human gate, not to a majority of models.
+
+Four more are rejected for v1 on cost/benefit rather than category: **P74 Canary Deployment** (needs real traffic; the eval suite is our gate), **P78 Semantic Caching** (v2 — and only after measuring *our* false-positive rate, since the book's own 0.90 threshold carries ~8% FPs), **P79 Batch Processing** (no high-volume uniform workload), **P88 Deferred Computation** (no off-peak tier), **P90 Cold Start Optimization** (a Go binary talking to onegw has nothing to warm). That is the honest total: **54 adopted, 29 deferred with a trigger, 17 rejected for now with a reason** — 100, no silent omissions.
 
 *v0.1.1 review pass — self-reviewed against both source documents and the onegw/xdev/LeanKG surfaces; fixed dead cross-references and a superseded pointer; added the two idempotency layers and their record of truth (§4.2), the duplicate-write test and the Ch.12 recovery numbers (§8), Appendix A's calibration baseline table (§17), and Appendix B's extended discount of the source (§18); §16 re-headlined with the verification basis; D0 added for review ownership).*
