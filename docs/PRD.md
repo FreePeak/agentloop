@@ -1,6 +1,6 @@
 # agentloop — Product Requirements Document
 
-**Status:** draft for review · **Version:** 1.1.0 · **Date:** 2026-09-18
+**Status:** draft for review · **Version:** 1.1.1 · **Date:** 2026-09-18
 **Repo:** `github.com/FreePeak/agentloop` (branch `docs/prd-agentloop-service`, no commits yet)
 **Canonical architecture:** [`design.md`](../design.md) — this PRD is the status/scope SoT and summarizes its decisions; it never duplicates its detail.
 
@@ -448,6 +448,7 @@ Every row here is a decision `design.md` §18 left open plus the two this PRD in
 - `loop-engineering-playbook-report.html` — full-book report (20 chapters, App. A–G): the numbers, thresholds, code shapes and pattern identifiers cited throughout, and the "where to discount" section that produced §18.
 - *The 0→1 Loop Engineering Playbook (2026 Edition)*, Valenx Press, first edition June 2026 — Ch.1–13 and App. A–G; the App. G CONFIG table is the basis of §17's per-template budgets, and the *Numbers to know* row for framework migration ("within 3% ship the custom version; more than 5% worse, debug before migrating") is why §1.2 refuses to write a framework, and App. C's 12-dimension matrix is the scoring behind that rule.
 - Portfolio surfaces this PRD binds to, verified against their repositories on 2026-09-18 by a read-only sweep that checked each claim file-by-file:  **onegw** (README tiering/combos, `[saver]`, `GET /v1/models`, `/admin/api/v1/usage/daily`; `docs/ARCHITECTURE.md` for the usage/cost rollups; `internal/idempotency`), **xdev** (`xdev rpc` JSONL-over-stdio, `internal/rpc`'s handler contract, `internal/serve` broker/gateway), **LeanKG** (`POST /api/v1/query`, the `query` MCP tool's action set, `/api/v1/memory/...` and its hindsight-compat aliases, the role model in `internal/auth`).
+- **How this document is verified:** `docs/check-prd.py` asserts the PRD's own load-bearing promises (every internal § reference resolves, all 100 App. B patterns are accounted for, every FR/NFR carries a sourced why, no default row has a vague source, §6 exposes the shapes a builder needs, the parity harness behind M3 exists, the provenance sweeps are recorded). Run it before committing a change to this file; `--selftest` proves the checks can actually fail.
 - Deep read of both source documents for this PRD was done on 2026-09-18; all 40+ numeric figures reproduced here were taken from the report's *Numbers to know* table and the PDF's chapter bodies, not recalled.
 - **QC pass (2026-09-18):** a second, independent read-only sweep re-checked every claim in this PRD against the four repositories and `design.md` — endpoints, routes, config sections, tool names, role model, protocol constant and section pointers. 16 of 18 claim groups confirmed at file:line; the four that were wrong are fixed in the text and recorded in the footer. Claims that could not be confirmed were deleted rather than softened.
 ## 17. Appendix A — Defaults & calibration baseline
@@ -499,6 +500,8 @@ What survives the discount, and why the playbook was applied at all: the loop-le
 *Last updated: 2026-09-18 (loop 10 closed — see the version history below; ten review loops over the playbook, each ending in a commit).*
 
 ---
+
+*v1.1.1 — `docs/check-prd.py` added and referenced from §16: the structural checks the ten loops were run by are now runnable by anyone editing this file.
 
 *v1.1.0 loop 10 (external review pass) — §6 is now a buildable contract (state + exit enums, run/step/idempotency/approval rows, wire error, full endpoint table with bodies and status codes, SSE events with `Last-Event-ID` resume); §4.2 gained the caller-key half of idempotency; the 0.7 double-duty is disambiguated by scope; memory ownership is split by tier (§4.3); M2 absorbed Ch.12's recovery ladder; M6 absorbed the monthly calibration job, the remaining Ch.11 analyzers and the latency/RSS baselines; three provenance cells corrected (one figure cannot be verified in the condensation and now says so); the standalone production-checklist table merged into §13.1. Ten loops closed; the structural assertion runs as the last check.
 
