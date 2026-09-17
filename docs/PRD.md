@@ -1,6 +1,6 @@
 # agentloop — Product Requirements Document
 
-**Status:** draft for review · **Version:** 1.0.1 · **Date:** 2026-09-18
+**Status:** draft for review · **Version:** 1.1.0 · **Date:** 2026-09-18
 **Repo:** `github.com/FreePeak/agentloop` (branch `docs/prd-agentloop-service`, no commits yet)
 **Canonical architecture:** [`design.md`](../design.md) — this PRD is the status/scope SoT and summarizes its decisions; it never duplicates its detail.
 
@@ -13,31 +13,16 @@
 | If you are | Read | Then |
 |---|---|---|
 | deciding whether to fund or build it | §23 (one-page summary), §1.1–§1.3 | §15, starting with D0 |
-| reviewing the design | §3, §4, §9 | §22 (this document's own weaknesses) |
-| about to write code | §13 + §13.1, §11.2, §17 | the cited `design.md` section for detail |
+| reviewing the design | §3 (incl. the draft §3.1), §4, §9 | §22 (this document's own weaknesses) |
+| about to write code | **§6 (the data model + wire shapes)**, §13 + §13.1, §11.2, §17 | the cited `design.md` section, and §9.1 for the accepted ceilings |
 | auditing the sources | §16, §18 | §20 (all 100 patterns accounted for) |
 | asking why a number is what it is | §17 | §11.5 (how it changes) |
 
-Section statuses, so nothing looks more settled than it is — **decided:** §§4.3, 7, 9, 13, 17 (and §17's own rule that no value is a spec); **draft pending review:** §§3.1, 15 (D1–D7 are the reviewer's to close); **v2 by design, listed so it cannot be mistaken for scope:** §§19, 21; **provenance and honesty:** §§16, 18, 20, 22, 23.
+Section statuses, so nothing looks more settled than it is — **decided:** §§4.3, 7, 9, 17 (and §17's own rule that no value is a spec); **draft pending review:** §§3.1, 5, 6, 11, 12, 13 (M3's cost claim needs the parity harness), 15 (D1–D7 are the reviewer's to close); **v2 by design, listed so it cannot be mistaken for scope:** §§19, 21; **provenance and honesty:** §§16, 18, 20, 22, 23.
 
-### Production checklist (the book's twelve moves, condensed)
+### Production checklist
 
-Kept here because it is the shortest honest summary of what *production-ready* means for this service. The full audit — each move mapped to a milestone and a test — is §13.1.
-
-| | Move | One-line test |
-|---|---|---|
-| 1 | **Name the termination** before the body | step, wall-clock, dollar, confidence, stall, consecutive-failure exits all exist and are typed |
-| 2 | **Separate success from stopping** | a success condition is not an exit reason — both are fields on the run |
-| 3 | **Route models by step type** | the highest-yield cost lever in the book (40–70%) — M3's parity test proves ours |
-| 4 | **Treat tools as an API surface** | validated inputs, structured outputs, do/don't descriptions, side-effect flags |
-| 5 | **Compress state, never history** | decisions stay verbatim, raw turns get evicted |
-| 6 | **Idempotency on every write** | fingerprint → check → persist, keyed by the run |
-| 7 | **Trace steps, not just results** | per-step tokens, cost, latency, confidence |
-| 8 | **Build the eval suite first** | the suite is the moat, not the loop |
-| 9 | **Budget the loop, not the request** | per-run *and* per-day, forced synthesis at 90% |
-| 10 | **Ask the human less than 10% of the time** | tier by reversibility, threshold by confidence, sample auto-approvals |
-| 11 | **Prefer fewer agents** | channels grow as `N(N−1)/2` — §10's gate stays shut |
-| 12 | **Verify, don't generate harder** | quality is bought in the verification stage, not in a bigger model |
+The book's twelve moves to production, one clause each: name the termination before the body · separate success from stopping · route models by step type (40–70%) · treat tools as an API surface · compress state, never history · idempotency on every write · trace steps, not just results · build the eval suite first · budget the loop, not the request · ask the human less than 10% of the time · prefer fewer agents · verify, don't generate harder. §13.1 maps each to the milestone and the test that proves it.
 
 ---
 
@@ -57,7 +42,7 @@ The book's domain chapters say this explicitly (Ch.14–17): in coding, research
 | G2 | Two execution modes — **ReAct** for unpredictable steps, **Plan-and-Execute** for structured multi-step work — with a **hybrid default** (plan per phase, ReAct inside a phase) | Ch.4's six failure modes, Ch.5 (*replanning after every step is essential, not optional*), P12 |
 | G3 | **Production by construction:** bounded loop + kill switch non-optional, idempotent writes, cost circuit breaker, traces + replay, eval-gated deploys | Ch.10–13; P1 + P75 (the two patterns the index marks unconditional), P3, P26 |
 | G4 | **Every number is a calibrated prior.** Model/step/cost/routing defaults ship as data with provenance; an eval run validates them | the report's *Numbers to know* table — and its "where to discount" section, which says the thresholds are asserted, not derived |
-| G5 | Costs are **metered per action and enforced before the action**, not discovered on the invoice | Ch.13 (*cost is the silent killer of agent projects*: $150k/mo bill of a "cheap" $0.50-per-run agent), P3, P76, P82 |
+| G5 | Costs are **metered per action and enforced before the action**, not discovered on the invoice | Ch.13 (*cost is the silent killer of agent projects*; the $150k/mo figure is the chapter's own worked example — quoted here for the shape, not the sum, and **not verifiable in the condensation** so it carries no weight in §17), P3, P76, P82 |
 
 The book's one law is adopted verbatim as the design law: every additional step **multiplies** cost, latency and failure probability. Therefore `MAX_STEPS` and `cost_budget` are economic instruments set per task type, not round numbers picked out of habit (`design.md` §1's problem statement and §4's loop contract).
 
@@ -73,7 +58,7 @@ The book's one law is adopted verbatim as the design law: every additional step 
 
 | Metric | Target | How measured |
 |---|---|---|
-| Loop containment | **0** runs exceeding `max_steps`, `cost_budget`, or wall-clock; 0 duplicate side-effect writes without an idempotency key | §11.2 cases 1–4, §8 duplicate-write test · book: P1 (*every loop has a maximum step count. No exceptions*), P75 |
+| Loop containment | **0** runs exceeding `max_steps`, `cost_budget`, or wall-clock; 0 duplicate side-effect writes, keyed or not | §11.2 cases 1–4, §8 duplicate-write test · book: P1 (*every loop has a maximum step count. No exceptions*), P75 |
 | Partial-answer honesty | 100% of budget-exhausted runs return a *labelled* partial synthesis, never a silent empty result | §11.2 case 1 · book: P3 (*halt and return the best result so far*) |
 | Cost vs. naive baseline | ≥40% lower cost per completed task at eval parity (budgeted target; the book's prior is 40–70% from routing alone) | §11 eval A/B, §12 knee table · book: Ch.5 (Opus plan / Sonnet execute / Haiku replan ≈50% cheaper) |
 | Reliability | ≥98% on the first use case before a second lands (book: reliability before features) | §11.4 deploy gate · book: Ch.18 (*a 95% success rate means 1 in 20 users has a bad experience*) |
@@ -121,7 +106,7 @@ That is what the decisions below implement — `AgentBase` is the abstraction la
 | Models | talk to **onegw** (OpenAI-compatible `/v1/chat/completions` + `/v1/messages`) | already the portfolio's LLM gateway: combo fallback chains, token savers, usage/cost rollups, per-key pools — none of which agentloop should re-implement |
 | Tiers / routing | **onegw combos**, not agentloop code (`planning`, `tiny`, plus a fail-open combo); the model list comes from `GET /v1/models` — and **one combo is ours to add** (`execution`, the mid tier between them, since onegw ships only `tiny`/`planning` today) | implements *route models by task type* as gateway config instead of our code; App. B's `Model Tiers` pattern = this plus agentloop's per-step `task_type` label. Caveat: onegw's own task-aware combo reordering landed but ships **off by default** (`server.task_routing`), so agentloop picks the combo per step from its own versioned, eval-gated table and lets onegw route *within* the tier — if `task_routing` is ever enabled portfolio-wide, agentloop's table becomes the second decision and must be reconciled in M3 |
 | Prompt cache / token saving | **onegw `[saver]`** (inject + external compress), not agentloop code | the provider-side prompt cache covers the static system+tools prefix; onegw's savers are the gateway-side half |
-| Persistence | SQLite (WAL) for runs/checkpoints/evals/audit; pgvector when a tenant needs it | implements P8 Checkpoint Loop (durable state every 3–5 steps) and P42 Memory Versioning (state replay for debugging); LeanKG sets the single-binary precedent |
+| Persistence | SQLite (WAL) for runs/checkpoints/evals/audit; pgvector when a tenant needs it · **a deliberate divergence from `design.md` §15's Postgres/Redis**, chosen for the single-binary deploy | implements P8 Checkpoint Loop (durable state every 3–5 steps) and P42 Memory Versioning (state replay for debugging); LeanKG sets the single-binary precedent |
 | UI | **HTMX over server-rendered templates**, no CDN | matches onegw's admin console discipline; the console's job is P91 Progressive Disclosure (summary first, evidence behind a disclosure) and P94 Explanation Mode — both of which are just markup, so a client-side framework would buy nothing |
 | Cost metering | agentloop computes per-span cost from a **versioned price table**; onegw usage rollups cross-check it | P3 Cost Circuit Breaker is an *enforcement* pattern (halt at the threshold and return the best result so far) — a gateway that reports after the fact cannot enforce it, and Ch.13's own 100× price range means the table has to be versioned config, not a constant in code |
 | Code intelligence | **LeanKG** over HTTP: ladder + graph verbs via `POST /api/v1/query`, memory via `/api/v1/memory/banks/{bank}/memories` | implements P33 Semantic Recall and P32 Landmark Memory over a real graph instead of re-embedding files: Ch.8's “large codebases are navigated with search plus selective retrieval, never full-context loading” only holds if the retrieval layer can answer structure questions (`impact`, `callers`, `context`), which a vector store cannot |
@@ -206,7 +191,7 @@ The reason this table is non-negotiable comes from the book's architecture chapt
 |---|---|---|---|
 | NFR-1 | Containment | 0 runs exceed any configured ceiling (enforced pre-action, tested) | P1/P3/P75 — the book's 20 × $0.05 × 10,000 users = $10,000/min runaway figure |
 | NFR-2 | Latency | API p95 acknowledges a run in <300 ms; step latency p95 reported and baselined, not just the run | P92/P81 — 10× wait tolerance is bought with visible progress, not with a faster loop |
-| NFR-3 | Memory | RSS bounded by construction (`debug.SetMemoryLimit` backstop, bounded queues/windows/output sinks), cell-checked on run state | portfolio envelope (onegw's ≤100 MB contract), not the book — the book assumes a server, we assume a box |
+| NFR-3 | Memory | RSS bounded by construction (`debug.SetMemoryLimit` backstop, bounded queues/windows/output sinks), cell-checked on run state | portfolio envelope: onegw's README advertises a ~100 MB RSS badge (verified in the loop-7 sweep), and this service is deployed in the same envelope — the book assumes a server, we assume a box |
 | NFR-4 | Durability | resume from a checkpoint after a mid-run fault without re-firing a write | P8 Checkpoint Loop (serialize every 3–5 steps; critical for 30+ min runs) + P26 |
 | NFR-5 | Observability | every run replayable; every alert threshold from Ch.11 wired to one dashboard | Ch.11's five pillars with traces as the "why"; one platform only |
 | NFR-6 | Portability | `CGO_ENABLED=0` single binary; loop code trafficks only through onegw and (v1) the 5-tool registry | *Numbers to know* (framework migration): one abstraction layer, then swap only within 3% on the same suite; App. C is the 12-dimension matrix behind that rule |
@@ -214,18 +199,51 @@ The reason this table is non-negotiable comes from the book's architecture chapt
 
 ## 6. API & data contract (v1 sketch)
 
-`design.md` §15 (API & data) is the contract of record; the table below is that contract, kept here because the API is what consumers integrate against:
+`design.md` §15 (API & data) is the contract of record. What follows is the part a builder cannot start without: the two records, their enums, and the wire shapes. Anything not stated here is inherited from `design.md` §15 unchanged.
 
-| Method | Path | Purpose |
+**State and exits — two different things (§13 move 2).** A run has a *state* (where it is) and an *exit reason* (why it stopped); success is a third, separate field, because "the plan finished" and "the goal was met" are not the same answer.
+
+| `state` | meaning |
+|---|---|
+| `queued` · `thinking` · `acting` · `evaluating` | in flight; one step is always in exactly one of these |
+| `paused_approval` | waiting on a gate; the run is not spending |
+| `success` | the evaluate phase's predicate held |
+| `exhausted` | a ceiling stopped it — `exit_reason` says which |
+| `failed` | an error class ended it unrecoverably |
+| `escalated` | handed to a human (timeout, confidence floor, or policy) |
+| `killed` | an operator stopped it; the partial synthesis is attached |
+
+| `exit_reason` | the six exits (§13.1 move 1) |
+|---|---|
+| `max_steps` · `wall_clock` · `cost_budget` · `daily_budget` · `confidence_floor` · `progress_stall` · `consecutive_failures` | every ceiling names itself; `success` runs carry none |
+
+**Two constants, one number, two scopes (the review caught this as a blocker).** A *step-level* confidence below the guard's floor does **not** exit the run — it forces a re-prompt or a replan (FR-4's self-correction path). A *run-level* confidence below `escalation_threshold` (0.7) after the final evaluate routes the run to `escalated` (§7.5, P68). The guard's `confidence_floor` exit exists only for the degenerate case where confidence stays low after the permitted correction rounds. Same 0.7, read at two scopes; the scope decides the behaviour.
+
+**`run` row** — `run_id` (ULID) · `tenant_id` (default `"default"`, §22 F8) · `goal` · `context` · `template` + `template_version_hash` · `max_steps` · `wall_clock_s` · `cost_budget` · `spend_usd` · `state` · `exit_reason` · `success` (nullable bool) · `partial_synthesis` (nullable text) · `created_at` · `deadline_at` · `checkpoint_blob` + `checkpoint_step`.
+
+**`step` row** — `step_id` · `run_id` · `idx` · `phase` (`think|act|evaluate`) · `tool` · `args_hash` · `result_hash` · `tokens_in/out` · `cost_usd` · `latency_ms` · `confidence` (nullable) · `started_at`.
+
+**`idempotency` row** — `key` (either `caller:<idempotency_key>` or `run:<run_id>:tool:<tool>:args:<args_hash>`) · `run_id` · `tool` · `outcome_json` · `created_at`. Both forms live in one table and are consulted before execution; the caller form is consulted when a new run is *admitted*, not only when a tool fires.
+
+**`approval` row** — `approval_id` · `run_id` · `step_id` · `action_preview` · `status` (`pending|approved|modified|rejected|timed_out`) · `decided_at` · `decided_by` · `modified_args`.
+
+**`error` shape (wire)** — `{type, message, options[], trace_id}` where `type ∈ {invalid_request, unknown_template, budget_exceeded, policy_denied, tool_failed, upstream_timeout, internal}`, `options` being the actionable alternatives (Ch.6/Ch.12: an error the model can act on).
+
+| Method | Path | Contract |
 |---|---|---|
-| `POST` | `/v1/runs` | submit `{goal, context, template?, max_steps?, cost_budget?, confirmations?, idempotency_key}` → `{run_id}` |
-| `GET` | `/v1/runs/{id}` | status, trajectory, spend, spans |
-| `POST` | `/v1/runs/{id}/approve` · `/modify` · `/reject` | human decision on a paused gate; timeout denies |
-| `POST` | `/v1/runs/{id}/kill` | the kill switch (P75) — tested quarterly, and by every deploy smoke test |
-| `GET` | `/v1/runs/{id}/events` | SSE step feed and webhook delivery for runs >5s (P92: *"Searching 3 databases…"* — the book's claim is 10× longer waits tolerated when progress is visible) |
-| `GET` | `/admin/api/v1/*` | console reads: runs, traces, budgets, evals, approval queue (paths follow onegw's console convention so both services read the same way) |
+| `POST` | `/v1/runs` | body `{goal, context, template?, max_steps?, wall_clock_s?, cost_budget?, confirmations?, idempotency_key?}` → `201 {run_id, state}`; `Idempotency-Key` header accepted as an alias for the body field; a repeat caller key returns the **first** run, not a second | 
+| `GET` | `/v1/runs/{id}` | `{state, exit_reason, success, spend_usd, steps[], approvals[], partial_synthesis?}` |
+| `GET` | `/v1/runs/{id}/approvals` | pending gates with their `approval_id` and preview (a run may hold several) |
+| `POST` | `/v1/runs/{id}/approvals/{approval_id}` | `{decision: approve|modify|reject, modified_args?}`; the timeout is `timed_out` and escalates with the partial |
+| `POST` | `/v1/runs/{id}/kill` | halts at the next step boundary, sets `state=killed`, returns the partial (P75) — tested quarterly and by every deploy smoke test |
+| `GET` | `/v1/runs/{id}/events` | SSE; event names `state`, `step`, `approval`, `done`; every event carries `id` for `Last-Event-ID` resume; the stream closes on a terminal state |
+| `GET` | `/admin/api/v1/*` | console reads (runs, traces, budgets, evals, approval queue), following onegw's path convention |
 
-Stores: runs+checkpoints (SQLite/pgvector-ready), traces/spans (one platform, Langfuse self-hosted as the default backend), exact+semantic caches (in-process + Redis when shared), eval cases + golden sets, audit log (append-only). Every span carries `(in×p_in + out×p_out)` at a **versioned price table** so BudgetGuard and the console agree to the cent.
+**`confirmations`** is `{policy: fail_closed|permissive, channels: [console|slack|webhook]}` — the gate list itself is policy (§7.3), never a per-call argument.
+
+**Units.** Tokens are counted with onegw's tokenizer (the same call the price table uses), which is why the 2,000-token cap is `truncate at 4,000 chars, else summarize to 5 items` — two fallbacks, one unit each.
+
+Stores: runs+checkpoints (SQLite/WAL — a deliberate divergence from `design.md` §15's Postgres/Redis, recorded here because it changes the deployment shape; Postgres + pgvector is the upgrade path in §9.1), traces/spans (one platform; **the backend is D2's decision**, Langfuse self-hosted as the recommendation until it closes), exact+semantic caches (in-process + Redis when shared), eval cases + goldensets, audit log (append-only). Every span carries `(in×p_in + out×p_out)` at a **versioned price table** so BudgetGuard and the console agree to the cent.
 
 ## 7. Trust boundaries, security, HITL
 
@@ -286,7 +304,7 @@ Per convention, deliberate shortcuts ship with a `ponytail:` comment naming the 
 
 ## 10. Multi-agent stance
 
-**Single agent in v1 (Ch.7).** The book's own gate is adopted literally: add agents only for *10+ distinct tools, mixed model tiers, genuine parallelism, or context beyond one window* — otherwise the channel tax (`N(N−1)/2`) eats the win. When agents land (milestone 7), the shape is fixed: hierarchical, teams of 3–4, typed messages (`task|result|question|feedback`) with per-receiver FIFO, a role card per agent in version control (name, model tier, tools, prompt, I/O format, failure behavior), disagreement by stakes (vote / arbitrate on a stronger model / escalate with a highlighted diff), and an explicit lifecycle — no zombies. Stop rule: coordination messages above 30% of tokens means we added too many.
+**Single agent in v1 (Ch.7).** The book's own gate is adopted literally: add an agent only for a **measured capability gap**, and the four gaps that qualify are *10+ distinct tools, mixed model tiers, genuine parallelism, or context beyond one window* (the four are the practical reading of Ch.7's rule, which is otherwise "if coordination messages exceed 30% of tokens, stop adding agents") — otherwise the channel tax (`N(N−1)/2`) eats the win. When agents land (milestone 7), the shape is fixed: hierarchical, teams of 3–4, typed messages (`task|result|question|feedback`) with per-receiver FIFO, a role card per agent in version control (name, model tier, tools, prompt, I/O format, failure behavior), disagreement by stakes (vote / arbitrate on a stronger model / escalate with a highlighted diff), and an explicit lifecycle — no zombies. Stop rule: coordination messages above 30% of tokens means we added too many.
 
 What that means concretely is that App. B's whole multi-agent band (P46–P60) is **deliberately not adopted** in v1, and the reason is arithmetic rather than modesty: coordination cost grows quadratically with agent count (Ch.7), so the book's own gate is the only honest trigger — 10+ distinct tools, mixed model tiers, genuine parallelism, or context beyond a single window. We have five tools and one window. Two patterns are also rejected on merit even after M7: **P49 Ensemble** (3–5 agents voting) buys reliability at 3–5× compute, which is a trade the eval suite has to prove before we pay it, and **P55 Consensus** is reserved for irreversible decisions — our irreversible decisions go to a *human* gate (§7.5), not to a majority of models agreeing with each other.
 
@@ -326,7 +344,7 @@ Every config change runs the full suite with 3 runs per case, `p<0.05`, watching
 
 ### 11.4 Deploy gate and the REFINE loop
 
-`EvalRunner` runs in CI; a deploy is blocked on the full-suite gate; each case runs on a fresh agent with `max_steps=10, max_cost=$1.00` (the book's harness caps; our per-run defaults stay §17's 9 steps / $1.00) and emits a JSON report (pass rate, avg/p95 latency, avg cost, per-category, failures). Every production incident's **first** fix step is a new regression case (Record → Extract → Formalize → Iterate → Normalize → Expand), +10 cases/week.
+`EvalRunner` runs in CI; a deploy is blocked on the full-suite gate. **Config changes also run the paired parity comparison** (the same 50 cases under both configurations, scored per case): a cost win only counts if no case falls below the incumbent by more than its tolerance — this is the harness M3's acceptance needs, and without it that acceptance is untestable. each case runs on a fresh agent with `max_steps=10, max_cost=$1.00` (the book's harness caps; our per-run defaults stay §17's 9 steps / $1.00) and emits a JSON report (pass rate, avg/p95 latency, avg cost, per-category, failures). Every production incident's **first** fix step is a new regression case (Record → Extract → Formalize → Iterate → Normalize → Expand), +10 cases/week.
 
 ### 11.5 Baseline calibration (the goal G4 loop)
 
@@ -370,7 +388,7 @@ The playbook closes with twelve moves it claims carry the whole book. This PRD i
 | 5 | **Compress state, never history** — summarise near the ceiling, keep decisions verbatim, evict raw turns | M4: 70% rule, landmarks verbatim, compression every 5 iterations | build, M4 |
 | 6 | **Idempotency on every write** (P26) | M1: fingerprint → check → persist-before-execute, plus the two-layer contract in §4.2 | build, M1 |
 | 7 | **Trace steps, not just results** — per-step tokens, cost, latency, confidence | M2 `Tracer`: nested spans, whitespace-trimmed prompts, one line per span | build, M2 |
-| 8 | **Build the eval suite first** — 50→200 cases, four categories, score+latency+cost gates | M6 is gated on the suite existing *before* any domain template ships; §11.2's containment suite is the M1 subset of it | build, M6 (earliest cases in M1) |
+| 8 | **Build the eval suite first** — 50→200 cases, four categories, score+latency+cost gates | the suite must exist *before* any domain template ships (one gate, stated once: §13's M6 row); §11.2's containment cases are its M1 subset | build, M6 (earliest cases in M1) |
 | 9 | **Budget the loop, not the request** — per-run + daily, force synthesis at 90% | M1 `BudgetGuard`: pre-action check, 10% pre-synthesis reserve, daily ceiling independent of the per-run one | build, M1 |
 | 10 | **Ask the human less than 10% of the time** — tier by reversibility, threshold by confidence, sample auto-approvals | M5: policy table, autonomy counters, `approvals` table as *training data* (the book's framing: approvals are labelled data for the day the gate is automated) — so the table ships in M1 and is filled in M5 | schema M1, behaviour M5 |
 | 11 | **Prefer fewer agents** | Structural: §10 states the gate; M7 is conditional and the PRD does not schedule it | structure, §10 |
@@ -455,9 +473,9 @@ The book's own framing is the licence for that posture — it prints these numbe
 | Circuit breaker | open at 5 failures / 60 s recovery / 2 half-open probes; per-tool 3 / 30 s | Ch.12 (*Numbers to know* + `CircuitBreaker(failure_threshold=5, recovery_timeout=60, half_open_max=2)`; the per-tool 3/30 s is the book's own "recommended") | per-tool error rates |
 | Self-correction | **≤2** rounds, high-stakes outputs only | Ch.12 (a critique pass costs about as much as generation, so two rounds triple that step; P61 catches 10–20% of mistakes) | marginal quality per round |
 | HITL interrupt budget | **<10%** of runs; ~95% of errors caught; 2% of auto-approvals sampled; median approve <3 s = rubber-stamping | Ch.9 | the measured confusion matrix — the target is the catch rate, not the interrupt rate |
-| Semantic cache similarity | **≥0.95**, and only after measuring *our* false positives (book: ~8% at 0.90, <1% at 0.95) | Ch.13 (P78; v2) | our own FP rate, per template |
+| Semantic cache similarity | **≥0.95**, and only after measuring *our* false positives (the book asserts ~8% at 0.90; the "<1% at 0.95" half is **our** extrapolation, and the 8% itself is listed in §18 as asserted rather than derived) | Ch.13 (P78; v2) | our own FP rate, per template |
 | Autonomy ramp | first 20 actions supervised → semi-auto above ~0.85 approval over 50+ → autonomous above ~0.95 over 100+ | Ch.9 | the tenant's own history only |
-| Eval pass gate | `score ≥ 0.8` ∧ latency ≤ cap ∧ cost ≤ cap; deploys blocked below an ~85% suite pass rate | Ch.10 | raise it as the suite matures, never lower it |
+| Eval pass gate | `score ≥ 0.8` ∧ latency ≤ cap ∧ cost ≤ cap; deploys blocked below an ~85% suite pass rate | Ch.10 — and note the book's own shipped `EvalRunner` uses `>= 0.7`: another internal conflict like Ch.8's 70-vs-80, resolved the same way, in favour of the stricter published number | raise it as the suite matures, never lower it |
 | Alert thresholds | success <93% warn / <85% page; p95 >10 s / >30 s; cost >2× / >5× baseline; tool errors >3% / >10%; budget 80% / 95% | Ch.11 | rolling baselines (§12.1) |
 | Trace retention | **90 days**; thresholds re-derived monthly; production→eval promotion weekly (a later addition, not part of the M6 gate) | our choice; onegw's `usage.retention_days` default agrees, and the book sets no retention number | storage cost vs replay need |
 
@@ -478,25 +496,29 @@ The book's own review flags these; the deep read found more. Read this before qu
 
 What survives the discount, and why the playbook was applied at all: the loop-level **patterns** — bounded loop, kill switch, idempotency on writes, model tiering, context ceilings, five-pillar observability, the four-category eval taxonomy, and *verify, don't generate harder*. None of them depends on a number being right, and each fails safe when it is wrong — which is the property a first version needs.
 
+*Last updated: 2026-09-18 (loop 10 closed — see the version history below; ten review loops over the playbook, each ending in a commit).*
+
 ---
 
-*v1.0.0 loop 9 — §23 (Appendix G) added: the one-page summary a reviewer can read alone; §22's fixes are folded into §11.2 (rungs, both retry shapes, injected double), §11.3 (flake census), §11.4 (promotion job is later), §5.1 FR-7 (timed-out approval escalates with the partial), §4 (interface-based registry), §13 (M3's parity half) and §17 (retention is ours).
+*v1.1.0 loop 10 (external review pass) — §6 is now a buildable contract (state + exit enums, run/step/idempotency/approval rows, wire error, full endpoint table with bodies and status codes, SSE events with `Last-Event-ID` resume); §4.2 gained the caller-key half of idempotency; the 0.7 double-duty is disambiguated by scope; memory ownership is split by tier (§4.3); M2 absorbed Ch.12's recovery ladder; M6 absorbed the monthly calibration job, the remaining Ch.11 analyzers and the latency/RSS baselines; three provenance cells corrected (one figure cannot be verified in the condensation and now says so); the standalone production-checklist table merged into §13.1. Ten loops closed; the structural assertion runs as the last check.
 
-*v0.9.0 loop 8 — §22 (Appendix F): ten adversarial findings against this PRD, four of which changed the text (M3's cost claim needs a quality-holding subset, the containment suite now states its rung to the 50-case suite, a timed-out approval escalates with the partial synthesis, and the tool registry is declared interface-based so the acceptance suite can inject test doubles) and six carried as accepted risk with a named mechanism. §11.2 and §11.3 gained the missing size and flake-census artifacts.
+ v1.0.0 loop 9 — §23 (Appendix G) added: the one-page summary a reviewer can read alone; §22's fixes are folded into §11.2 (rungs, both retry shapes, injected double), §11.3 (flake census), §11.4 (promotion job is later), §5.1 FR-7 (timed-out approval escalates with the partial), §4 (interface-based registry), §13 (M3's parity half) and §17 (retention is ours).
 
-*v0.8.0 loop 7 — every external claim re-verified against onegw/xdev/LeanKG and `design.md`. Fixed: wrong `design.md` section pointers (§13→§15 API, §15→§17 build order, §16→§18 open questions, platform layer §6–12→§6–10), the fictional `execution` combo (onegw ships `tiny`/`planning`; `execution` is ours to define), the stale "onegw has no per-step routing" caveat (its task-aware reordering exists but ships off), design.md §18's different fifth tool (stated as a deliberate divergence instead of silently ignored), and three numeric drifts (`max_steps`, wall-clock, compression window). Added: the QC provenance of that sweep in §16.
+ v0.9.0 loop 8 — §22 (Appendix F): ten adversarial findings against this PRD, four of which changed the text (M3's cost claim needs a quality-holding subset, the containment suite now states its rung to the 50-case suite, a timed-out approval escalates with the partial synthesis, and the tool registry is declared interface-based so the acceptance suite can inject test doubles) and six carried as accepted risk with a named mechanism. §11.2 and §11.3 gained the missing size and flake-census artifacts.
 
-*v0.7.0 loop 6 — §21 (Appendix E): the four domain chapters mined for the *why* of each loop, and each mechanism tracked against what v1 already ships (coding: 4 of 5 in place; research: verification as a stage + labelled training-knowledge fallback; business process: exception path = §7.5; creative: the +30/+10/+3 curve = the ≤2-round cap and the ≥30-example rubric calibration rule).
+ v0.8.0 loop 7 — every external claim re-verified against onegw/xdev/LeanKG and `design.md`. Fixed: wrong `design.md` section pointers (§13→§15 API, §15→§17 build order, §16→§18 open questions, platform layer §6–12→§6–10), the fictional `execution` combo (onegw ships `tiny`/`planning`; `execution` is ours to define), the stale "onegw has no per-step routing" caveat (its task-aware reordering exists but ships off), design.md §18's different fifth tool (stated as a deliberate divergence instead of silently ignored), and three numeric drifts (`max_steps`, wall-clock, compression window). Added: the QC provenance of that sweep in §16.
 
-*v0.6.0 loop 5 — §20 (Appendix D) accounts for all 100 of the book's patterns: 54 adopted with the milestone that tests them, 29 deferred with a named adoption trigger, 17 rejected for now with a reason. No silent omissions.
+ v0.7.0 loop 6 — §21 (Appendix E): the four domain chapters mined for the *why* of each loop, and each mechanism tracked against what v1 already ships (coding: 4 of 5 in place; research: verification as a stage + labelled training-knowledge fallback; business process: exception path = §7.5; creative: the +30/+10/+3 curve = the ≤2-round cap and the ≥30-example rubric calibration rule).
 
-*v0.5.0 loop 4 — every row of the defaults table now names its chapter or number, the two genuinely non-book rows say so, and §19 (Appendix C) sets out the App. G template library as v2: per-template steps/tools/budget from the book, the trigger to add each, and the loop we would build — plus the three observations (3–5 tools, 5–12 steps, confirmation on the irreversible tool) that justify §4's five and §7.3's fail-closed policy table.
+ v0.6.0 loop 5 — §20 (Appendix D) accounts for all 100 of the book's patterns: 54 adopted with the milestone that tests them, 29 deferred with a named adoption trigger, 17 rejected for now with a reason. No silent omissions.
 
-*v0.4.0 loop 3 — the book's closing sections are now applied, not just cited: §13.1 maps all twelve "moves that carry the book" to a milestone and a test, the production checklist sits next to the goals, M1's acceptance names P1/P75 as its definition, and six cheap-but-premature patterns (P74, P49/P55, P78, P79, P88, P90) are listed as deliberately not built, each with its trigger.
+ v0.5.0 loop 4 — every row of the defaults table now names its chapter or number, the two genuinely non-book rows say so, and §19 (Appendix C) sets out the App. G template library as v2: per-template steps/tools/budget from the book, the trigger to add each, and the loop we would build — plus the three observations (3–5 tools, 5–12 steps, confirmation on the irreversible tool) that justify §4's five and §7.3's fail-closed policy table.
 
-*v0.3.0 loop 2 — no orphan assertions left: §3 states the book's own recommendation and where we disagree with it (Ch.2's 30% rule, App. C's 3%), §4.1 says why the surface is 5 and not 40, §4.2 names the failure P26 prevents, §4.3 explains why enforcement cannot sit with the model, §7.5 leads with approval fatigue, §9 pairs every invariant with the mechanism that enforces it, §10 explicitly rejects P46–P60 and says why P49/P55 stay rejected, §§11–12 say what the book's two claims actually buy.
+ v0.4.0 loop 3 — the book's closing sections are now applied, not just cited: §13.1 maps all twelve "moves that carry the book" to a milestone and a test, the production checklist sits next to the goals, M1's acceptance names P1/P75 as its definition, and six cheap-but-premature patterns (P74, P49/P55, P78, P79, P88, P90) are listed as deliberately not built, each with its trigger.
 
-*v0.2.0 loop 1 — every load-bearing number now cites its source: goals carry pattern ids (P1/P75 unconditional), FRs carry the pattern band and the number behind them (P19 80% of tool errors, P29 60–80% of context tokens, P34, P39's 40/20/20/20, P12, P92), NFRs gained a "there because" column, the success criteria cite both the book's claim and our test.
+ v0.3.0 loop 2 — no orphan assertions left: §3 states the book's own recommendation and where we disagree with it (Ch.2's 30% rule, App. C's 3%), §4.1 says why the surface is 5 and not 40, §4.2 names the failure P26 prevents, §4.3 explains why enforcement cannot sit with the model, §7.5 leads with approval fatigue, §9 pairs every invariant with the mechanism that enforces it, §10 explicitly rejects P46–P60 and says why P49/P55 stay rejected, §§11–12 say what the book's two claims actually buy.
+
+ v0.2.0 loop 1 — every load-bearing number now cites its source: goals carry pattern ids (P1/P75 unconditional), FRs carry the pattern band and the number behind them (P19 80% of tool errors, P29 60–80% of context tokens, P34, P39's 40/20/20/20, P12, P92), NFRs gained a "there because" column, the success criteria cite both the book's claim and our test.
 
 ## 19. Appendix C — v2 template library (App. G, adapted)
 
@@ -507,7 +529,7 @@ The book ships eight copy-paste architectures in App. G. They are **not** a v1 d
 | 1 · Customer Support | 5 / $0.05, escalation at 0.7 | 3 | first external tenant with a KB | classify → retrieve (KB) → answer or escalate; P68 confidence routes to a human |
 | 2 · Data Analysis | 8 / $0.30, `query_timeout` 30 s, `max_rows` 100 | 3 | first analytics question worth answering in SQL | schema → read-only SELECT → plain-language result with caveats; read-only by construction (§7.3) |
 | 3 · Content Generation | 6 / $0.20, quality gate 0.85 | 4 | a real publishing workflow | generate → self-critique to ≥0.85 → revise; P61/P62, capped at 2 rounds |
-| 4 · Code Review | 10 / $0.50, ≤20 files | 4 | **first real template** (see §13's week 3) | diff → `repo_context` impact → findings with line numbers → comment; verify, don't generate (Ch.14) |
+| 4 · Code Review | 10 / $0.50, ≤20 files | 4 | **first real template** — after the M6 suite exists (the one gate for all templates) | diff → `repo_context` impact → findings with line numbers → comment; verify, don't generate (Ch.14) |
 | 5 · Scheduling | 6 / $0.03, `create_event` requires confirmation | 3 | a calendar surface exists | availability → propose → **confirm → write**; the purest P30/P62 case |
 | 6 · Monitoring & Alerting | 8 / $0.40, auto-escalate at 300 s | 5 | on-call handoff is wanted | alert → metrics/logs → severity → mitigation or incident; P75 must work under load (§11.2 case 4) |
 | 7 · Document Processing | 5 / $0.08, confidence 0.90, review queue | 5 | invoice/contract volume justifies it | classify → extract → validate → route; below 0.90 confidence goes to `needs_review` |
@@ -574,7 +596,7 @@ The chapter's loop is **write code → run tests → fix failures → repeat, �
 | `run_tests` in a sandbox | a write tool with a restricted workspace and a typed result | **already in v1** (tool 4) |
 | Verify the edit, not the intention | the evaluate phase must run the test result through a predicate before the loop continues | **already an invariant** (§9, invariant 2) |
 
-That overlap is not a coincidence: the portfolio's own harness (xdev) is the execution surface, so this chapter's loop is the one v1 can run end to end on day one. It is also why M1's first template is Code Review (§19, row 4).
+That overlap is not a coincidence: the portfolio's own harness (xdev) is the execution surface, so this chapter's loop is the one v1 can run end to end on day one. It is also why the first template (Code Review, §19 row 4) is the one M6 unlocks rather than M1.
 
 ### Research (Ch.15) — verification is a stage, not a hope
 
@@ -601,7 +623,7 @@ The chapter's warning is the one we have to carry into §11: **the loop only imp
 Written the way an unfriendly reviewer would write it, then answered. Every finding is a real objection against the text as it stands; two of them changed the text (F3 → §11.2's rung table, F9 → §11.4's eval-scope correction). Findings with no fix are marked **accepted risk**, because pretending they are solved would be the first failure this section is meant to catch.
 
 **F1 — "Your own eval suite cannot test your headline claim."** §1.3 promises ≥40% lower cost *at eval parity*, and M3's acceptance is "a 5+-step task is ≥40% cheaper at parity (±3%)". Cost is measurable; **parity is not measured anywhere in §11.2** — the containment suite asserts that ceilings hold, not that quality did not move. A cheaper loop that degrades slightly would pass M3.
-**Fix:** the claim is only testable with a *quality-holding* subset (the same 50-case suite run under both configurations, scored per case, with a paired comparison), and §11.4 now says so. Until that exists, M3's number is aspirational and §13 labels it as such.
+**Fix applied:** §11.4 now requires a **paired parity comparison** for every config change (same 50 cases both ways, scored per case, no case below the incumbent beyond its tolerance), and M3's acceptance is written as that comparison rather than as a cost number. Until that harness exists, M3's number is labelled aspirational in §13.
 
 **F2 — "Nine steps is a number you inherited, not derived."** §17 admits it (Ch.1's 6-step task + 30% headroom). For a LoopRunner whose entire job is bounding, the v1 default is someone else's task class. The monthly re-derivation (§11.5) is a promise, not a measurement.
 **Accepted risk, with a named fallback:** the first staging deployment sets `max_steps` from the observed p95 completion count, and until then the number is a *guard default*, not an optimization. What would make it wrong: a template whose tasks genuinely need 15 steps — then M3's tiering, not the ceiling, absorbs it.
@@ -616,7 +638,7 @@ Written the way an unfriendly reviewer would write it, then answered. Every find
 **Fix, applied in the text:** a timed-out approval is an **escalation with the partial synthesis attached**, not a denial of the run's result. Denial is the *policy* answer; the operator still gets what was learned, which is also what P100 (Graceful Handoff) asks for.
 
 **F6 — "Your two idempotency layers are keyed differently and you did not notice."** onegw's dedup keys on the request (`Idempotency-Key`/`X-Request-Id`), xdev's policy keys on the *call*, and agentloop keys on `sha256(run_id + tool + canonical(args))`. A retry that changes only the run id defeats the durable layer while still burning a provider call.
-**Accepted risk, bounded:** the run id is *supposed* to be part of the key — a new run is a new intent — but the PRD never states it. §11.2 case 2 must therefore test *both* retry shapes: same run id (must not re-fire) and new run id (must be caught by the caller's own key or the approval gate). Named in the case list.
+**Accepted risk, bounded:** the run id is *supposed* to be part of the key — a new run is a new intent — and §4.2 now states it alongside the caller-key form (§6's `idempotency` row), so the risk is the *implementation* drifting from the two forms rather than the doc being silent. §11.2 case 2 must therefore test *both* retry shapes: same run id (must not re-fire) and new run id (must be caught by the caller's own key or the approval gate). Named in the case list.
 
 **F7 — "Five tools cannot run your own M1 acceptance."** Case 2 needs a write tool pointed at a recorder, case 4 needs an in-flight tool call to kill, case 5 needs injected retrieval. The recorder and the injection source are **test doubles that live outside the five-tool surface**, and §4 says nothing about how a test injects a tool.
 **Fix, applied:** the registry is interface-based and the suite registers its own tools in tests. That is the boring answer, but it has to be written down, because "five tools" invites a reviewer to think the registry is closed.
@@ -629,6 +651,15 @@ Written the way an unfriendly reviewer would write it, then answered. Every find
 
 **F10 — "The document is 500 lines and the buildable part is not on the first page."** A reviewer who reads only §1 learns the goals; a reviewer who reads only §13 learns the plan; the numbers that would change either are in §17. The PRD is long because it is a doc of record, but nothing forces the reader to hold all of it.
 **Fix:** the production checklist and the goals table sit in the first ten lines, §13.1 maps scope to milestones, and §23 (Appendix G) is a 60-line summary a reviewer can read alone. If a section cannot be summarized there, it does not belong in this document.
+
+**F11 — "The contract of record is a purpose table, not a contract."** §6 said `design.md` §15 *was* the contract while listing only endpoint purposes: no state enum, no exit enum, no run/step/idempotency/approval row, no error shape, no `wall_clock_s` in the submit body, and an SSE endpoint with no event names.
+**Fix applied (external review, blocker #1):** §6 now carries the two enums (state, exit reason), the four row shapes, the wire error, the full endpoint table with bodies and status codes, the idempotency-key transport, and SSE event names with `Last-Event-ID` resume. The first builder no longer invents the schema.
+
+**F12 — "Confidence 0.7 is both an exit and a HITL route."** Two control-flow behaviours on one constant, which is unbuildable without choosing.
+**Fix applied:** §6 states the scopes — step-level confidence below the floor forces a replan/self-correction; run-level confidence below 0.7 after the final evaluate escalates; the `confidence_floor` *exit* only fires if confidence stays low after the permitted correction rounds.
+
+**F13 — "Half of Ch.12 had no milestone."** The recovery ladder (§8) — retry policy, fallback rungs, per-tool breaker, escalation packet, degrade copy — was required by FR-5/FR-9 and gated nowhere, so a builder sequencing off §13 would have skipped it until production found it.
+**Fix applied:** M2 is now "guards, recovery + tracing" with an acceptance that kills an upstream and expects the fallback rung and the degrade copy. The monthly calibration job, the remaining Ch.11 alert analyzers, the latency and RSS baselines moved into M6; parsing-pack size, retention promotion, cache backends and the 30-minute approval timeout are declared later additions rather than implied v1 work.
 
 **What this appendix is not.** It is not a risk register (that is §14), and it is not a substitute for a reviewer who disagrees: it is the list of objections I could *prove* against my own text, written before someone else did.
 
@@ -652,4 +683,4 @@ Written the way an unfriendly reviewer would write it, then answered. Every find
 
 **Read next.** §13.1 (scope → milestones), §17 (defaults), §18 (where to discount the source), §22 (this document's own weaknesses).
 
-*v0.1.1 review pass — self-reviewed against both source documents and the onegw/xdev/LeanKG surfaces; fixed dead cross-references and a superseded pointer; added the two idempotency layers and their record of truth (§4.2), the duplicate-write test and the Ch.12 recovery numbers (§8), Appendix A's calibration baseline table (§17), and Appendix B's extended discount of the source (§18); §16 re-headlined with the verification basis; D0 added for review ownership).*
+ v0.1.1 review pass — self-reviewed against both source documents and the onegw/xdev/LeanKG surfaces; fixed dead cross-references and a superseded pointer; added the two idempotency layers and their record of truth (§4.2), the duplicate-write test and the Ch.12 recovery numbers (§8), Appendix A's calibration baseline table (§17), and Appendix B's extended discount of the source (§18); §16 re-headlined with the verification basis; D0 added for review ownership).*
