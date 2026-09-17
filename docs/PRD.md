@@ -1,6 +1,6 @@
 # agentloop — Product Requirements Document
 
-**Status:** draft for review · **Version:** 0.2.0 · **Date:** 2026-09-18
+**Status:** draft for review · **Version:** 0.3.0 · **Date:** 2026-09-18
 **Repo:** `github.com/FreePeak/agentloop` (branch `docs/prd-agentloop-service`, no commits yet)
 **Canonical architecture:** [`design.md`](../design.md) — this PRD is the status/scope SoT and summarizes its decisions; it never duplicates its detail.
 
@@ -63,7 +63,7 @@ The diagnostic attached to it is the reason the mapping earns its place in a PRD
 
 ## 3. Architecture summary
 
-Full detail and the request flow live in [`design.md`](../design.md) §3–§6. Summary:
+Full detail and the request flow live in [`design.md`](../design.md) §3–§6. The shape below is Ch.3's control-loop model made concrete: **sensor** (memory + tool results), **controller** (router/planner/executor choosing the model tier), **actuator** (the tool registry), **feedback** (the evaluate phase), **termination** (the guard set). Ch.3's own summary of the chapter is the design brief for this section — *think in trajectories and convergence, not inputs and outputs*; trajectory divergence is the failure mode the guards exist for, and state compression is what stops the loop degrading as it runs. Summary:
 
 ```
  submit goal ──► Router (cheap tier) ──► Planner (strong tier) ──► Executor pool (ReAct + ToolRouter)
@@ -77,21 +77,23 @@ Full detail and the request flow live in [`design.md`](../design.md) §3–§6. 
 
 ### 3.1 Stack decisions (draft — pending review, see §15)
 
-The user's stated direction is **Go service + HTMX UI**; `design.md` §16 left the runtime open. The PRD takes the direction as decided so the build order can be planned, and records the trade-off:
+The book's recommendation is explicit and it is *not* "write it in Go": for a **production** system, start custom rather than framework-first (Ch.7), wrap frameworks in an abstraction layer so they can be swapped (App. C), and migrate only when the replacement scores within 3% on the same eval suite. It also warns where the framework money goes: LangChain/LangGraph/CrewAI "add debugging complexity" in production.
+
+That is what the decisions below implement — `AgentBase` is the abstraction layer, onegw is the model transport we refuse to rewrite, and the parts the book says are load-bearing (bounds, budgets, traces, eval) are ours. The user's stated direction is **Go service + HTMX UI**; `design.md` §16 left the runtime open. The PRD takes the direction as decided so the build order can be planned, and records the trade-off:
 
 | Layer | Decision | Why / cost |
 |---|---|---|
-| Service | **Go 1.25**, `net/http` mux with method+pattern routes, `CGO_ENABLED=0` single binary | matches the rest of the portfolio (onegw, xdev, LeanKG); container is a static binary |
-| Loop | Go goroutine pool + `context` deadlines; one goroutine per phase, `errgroup` for fan-out | replaces `asyncio.gather`; same parallel-phase semantics, explicit cancellation |
+| Service | **Go 1.25**, `net/http` mux with method+pattern routes, `CGO_ENABLED=0` single binary | matches the rest of the portfolio (onegw, xdev, LeanKG) and the deployment envelope; the book is runtime-agnostic (its code is Python pseudocode), so this is a portfolio decision, not a book one — stated that way instead of dressed up as technique |
+| Loop | Go goroutine pool + `context` deadlines; one goroutine per phase, `errgroup` for fan-out | implements P11 Parallel Loop (60–80% wall-clock cut on independent work) and Ch.5's 40–60% phase-parallel figure; replaces `asyncio.gather` with the same semantics plus explicit cancellation |
 | Models | talk to **onegw** (OpenAI-compatible `/v1/chat/completions` + `/v1/messages`) | already the portfolio's LLM gateway: combo fallback chains, token savers, usage/cost rollups, per-key pools — none of which agentloop should re-implement |
 | Tiers / routing | **onegw combos**, not agentloop code (`planning`, `execution`, `tiny`, plus a fail-open combo); the model list comes from `GET /v1/models` | implements *route models by task type* as gateway config instead of our code; App. B's `Model Tiers` pattern = this plus agentloop's per-step `task_type` label. Caveat: onegw has no per-step routing decision today (its issue #44), so agentloop picks the combo per step from its own versioned, eval-gated table and lets onegw route *within* the tier |
 | Prompt cache / token saving | **onegw `[saver]`** (inject + external compress), not agentloop code | the provider-side prompt cache covers the static system+tools prefix; onegw's savers are the gateway-side half |
-| Persistence | SQLite (WAL) for runs/checkpoints/evals/audit; pgvector when a tenant needs it | single-binary deploys; LeanKG already sets the precedent |
-| UI | **HTMX over server-rendered templates**, no CDN | matches onegw's admin console discipline; the console is a debug surface, not the product |
-| Cost metering | agentloop computes per-span cost from a **versioned price table**; onegw usage rollups cross-check it | agentloop must enforce *before* spend; onegw only reports after |
-| Code intelligence | **LeanKG** over HTTP: ladder + graph verbs via `POST /api/v1/query`, memory via `/api/v1/memory/banks/{bank}/memories` | the *search + selective retrieval, never full-context loading* rule (Ch.8) needs a real graph service; LeanKG is it |
+| Persistence | SQLite (WAL) for runs/checkpoints/evals/audit; pgvector when a tenant needs it | implements P8 Checkpoint Loop (durable state every 3–5 steps) and P42 Memory Versioning (state replay for debugging); LeanKG sets the single-binary precedent |
+| UI | **HTMX over server-rendered templates**, no CDN | matches onegw's admin console discipline; the console's job is P91 Progressive Disclosure (summary first, evidence behind a disclosure) and P94 Explanation Mode — both of which are just markup, so a client-side framework would buy nothing |
+| Cost metering | agentloop computes per-span cost from a **versioned price table**; onegw usage rollups cross-check it | P3 Cost Circuit Breaker is an *enforcement* pattern (halt at the threshold and return the best result so far) — a gateway that reports after the fact cannot enforce it, and Ch.13's own 100× price range means the table has to be versioned config, not a constant in code |
+| Code intelligence | **LeanKG** over HTTP: ladder + graph verbs via `POST /api/v1/query`, memory via `/api/v1/memory/banks/{bank}/memories` | implements P33 Semantic Recall and P32 Landmark Memory over a real graph instead of re-embedding files: Ch.8's “large codebases are navigated with search plus selective retrieval, never full-context loading” only holds if the retrieval layer can answer structure questions (`impact`, `callers`, `context`), which a vector store cannot |
 
-**Runtime risk, stated honestly:** the book's code shapes (asyncio fan-out, Python SDK tool-use) do not port line-for-line; Go buys the deployment envelope and the portfolio's operational habits, and costs the SDK's reference implementations. That trade is only defensible because §11 (evals) measures it — if Go's loop plumbing delays the eval suite past milestone 2, the decision is wrong and gets revisited in §15.
+**Runtime risk, stated honestly:** the book's code shapes (asyncio fan-out, Python SDK tool-use) do not port line-for-line; Go buys the deployment envelope and the portfolio's operational habits, and costs the SDK's reference implementations. Two things make this a recorded decision rather than a preference. First, the book itself disagrees with "start custom" in Ch.2 — its landscape chapter says *past a 30% workaround share, go custom*, and App. C scores frameworks on a 12-dimension matrix instead of dismissing them. We are past that share: the portfolio already maintains the three services this loop binds to. Second, the trade is only defensible because §11 (evals) measures it — if Go's loop plumbing delays the eval suite past milestone 2, the decision is wrong and gets revisited in §15.
 
 ## 4. Tool-use engineering + v1 integration surface
 
@@ -109,6 +111,8 @@ Rules (Ch.6, `design.md` §5): typed envelope `ToolResult(success, data, message
 | 4 | `run_tests` | `xdev rpc` (JSONL over stdio) running in a **restricted** `--add-dir` workspace | **yes** (sandboxed) | the verification half of the write-test-fix loop (Ch.14, ≤3 attempts); never a raw shell tool in v1 |
 | 5 | `write_file` | `xdev rpc` file tools | **yes** | read twin = `repo_context`; approval gate by policy (§7.3); idempotency key on every call (§4.2) |
 
+**Why five and not forty (Ch.6 / App. B):** the book's rule is *tool quality determines agent quality*, and it puts the working set at 5–15 tools with a router past it. What it is protecting is not token cost but **selection accuracy**: past ~15 tools the model reaches for `tool_17` when it meant `tool_3`, and every schema is paid on every step. Five is the bottom of that band on purpose — it is a budget spent deliberately, and a new tool has to earn its slot (§14).
+
 Deferred to v2, deliberately: a persistent memory tool (LeanKG memory-bank shape first, Ch.8 — the one deferral the loop genuinely feels), a human-task tool (Jira/Confluence), and a generic `bash`. A generic shell is the single largest blast radius in the tool surface and buys nothing the four tools above do not already cover.
 
 ### 4.1 xdev as the execution sandbox — contract
@@ -121,7 +125,7 @@ xdev is the harness this very session runs in; its `rpc` mode is documented as t
 
 ### 4.2 Two idempotency layers, one record of truth
 
-A real collision to settle: onegw already ships idempotency (`internal/idempotency`, `Idempotency-Key` or an `X-Request-Id` fallback) and xdev ships a per-call permission policy. Neither is sufficient, for a stated reason.
+The book lists idempotent tools as the pattern standing between an agent and a duplicate-write incident on retry (P26, *"makes retries safe"*), and its advice is one pattern, one rule — here the collision is real and needs three layers untangled before the rule can be stated. A real collision to settle: onegw already ships idempotency (`internal/idempotency`, `Idempotency-Key` or an `X-Request-Id` fallback) and xdev ships a per-call permission policy. Neither is sufficient, for a stated reason.
 
 | Layer | Semantics | Why it is not enough for a loop |
 |---|---|---|
@@ -132,6 +136,8 @@ A real collision to settle: onegw already ships idempotency (`internal/idempoten
 Rule: a write is keyed, checked and recorded by agentloop. Gateway dedup and sandbox permission may both fire first; neither can substitute.
 
 ### 4.3 Separation of powers (non-negotiable)
+
+The reason this table is non-negotiable comes from the book's architecture chapter, not from taste: every layer here is one the agent may *talk about* but must never *move*. A model that can lower its own step ceiling, a sandbox that decides its own budget, a gateway that reports spend after the fact — each is a control that the controlled component can relax. The book's ordering principle is that control loops are only as strong as their weakest enforcement point, so each concern is pinned to the component that cannot be talked out of it by retrieved text or by the model's own plan.
 
 | Concern | Owner | Rule |
 |---|---|---|
@@ -199,7 +205,7 @@ Destructive and irreversible actions sit behind `confirm_action` with a preview;
 v1 is single-tenant, but PII redaction is applied **after** action (with rollback on side-effect surprise) and the memory deletion API is part of the contract, because retrofit deletion is how PII work always goes wrong. Per-tenant budgets and isolation are §15 open decisions with the seam named (LeanKG's org/resource-claim model).
 
 ### 7.5 HITL
-Approval gates, confidence thresholds, audit trails, progressive autonomy (supervised → semi-auto → autonomous, ramped by measured approval rate). Target: interrupt <10% of the time while catching ~95% of errors; sample auto-approvals; flag rubber-stamping. Approvals are training data for the day that gate is automated.
+The four HITL patterns are all adopted, because the book is blunt about which single failure makes them pointless: **approval fatigue is worse than no approval** (Ch.9). An operator who rubber-stamps 40 gates a day is not a control, they are a latency. Hence gates, confidence thresholds, audit trails and progressive autonomy (supervised → semi-auto → autonomous, ramped by *measured* approval rate, not by time). Target: interrupt <10% of the time while catching ~95% of errors; sample auto-approvals; flag rubber-stamping. Approvals are training data for the day that gate is automated.
 
 ## 8. Error taxonomy & recovery (Ch.12)
 
@@ -220,6 +226,8 @@ The five recovery strategies map onto the loop as: retry the failure → fall ba
 Circuit breaker per tool, half-open probes, single failure reopens. Escalation always ships the packet: what happened / what was tried / what is needed / the full trace.
 
 ## 9. Loop invariants (testable)
+
+These are not preferences. The book's one-line creed for production loops — *max steps, observability, recovery, cost, monitoring* (Ch.3) — is a list of properties, and properties only hold if something makes them impossible to violate. Each invariant below names the mechanism that enforces it, so a reviewer can ask "what fails if this is violated" and get an answer that is not prose.
 
 New invariants from this PRD, beyond `design.md` §4:
 
@@ -243,7 +251,11 @@ Per convention, deliberate shortcuts ship with a `ponytail:` comment naming the 
 
 **Single agent in v1.** The book's own gate is adopted literally: add agents only for *10+ distinct tools, mixed model tiers, genuine parallelism, or context beyond one window* — otherwise the channel tax (`N(N−1)/2`) eats the win. When agents land (milestone 7), the shape is fixed: hierarchical, teams of 3–4, typed messages (`task|result|question|feedback`) with per-receiver FIFO, a role card per agent in version control (name, model tier, tools, prompt, I/O format, failure behavior), disagreement by stakes (vote / arbitrate on a stronger model / escalate with a highlighted diff), and an explicit lifecycle — no zombies. Stop rule: coordination messages above 30% of tokens means we added too many.
 
+What that means concretely is that App. B's whole multi-agent band (P46–P60) is **deliberately not adopted** in v1, and the reason is arithmetic rather than modesty: coordination cost grows quadratically with agent count (Ch.7), so the book's own gate is the only honest trigger — 10+ distinct tools, mixed model tiers, genuine parallelism, or context beyond a single window. We have five tools and one window. Two patterns are also rejected on merit even after M7: **P49 Ensemble** (3–5 agents voting) buys reliability at 3–5× compute, which is a trade the eval suite has to prove before we pay it, and **P55 Consensus** is reserved for irreversible decisions — our irreversible decisions go to a *human* gate (§7.5), not to a majority of models agreeing with each other.
+
 ## 11. Evaluation — the product (Ch.10)
+
+The book's chapter on evaluation opens with the reason this section is not an appendix: agent evaluation is *fundamentally harder* than LLM evaluation, because a run is non-deterministic, has intermediate steps nobody scores, and changes the world on the way through. Public benchmarks (SWE-bench, HumanEval, GAIA, WebArena) give an industry baseline but cannot answer "did *our* change make *our* agent worse". So the eval suite is custom, owned, and a deploy gate — not a number quoted from a paper. That is also why §11 is where this PRD claims a moat rather than in §4's loop, which any team can write in a week.
 
 ### 11.1 Case taxonomy and gates
 
@@ -276,6 +288,8 @@ Every config change runs the full suite with 3 runs per case, `p<0.05`, watching
 The book's priors ship as defaults **with their source cited**, and a monthly job re-derives them from our own traces: `max_steps` from staging p95 completions × 1.3; cycle threshold from observed cycle rates; alert thresholds from the rolling baseline; cache similarity from measured false positives. Until a number is re-derived, it is labeled a prior in the code and the console.
 
 ## 12. Observability & cost (Ch.11, Ch.13)
+
+Two book claims set the shape of this section. On observability: *logs tell you what happened; traces tell you why* — which is why nested spans start in the first commit even though a flat log is easier, since the book's own words are that nested spans are "trivial to build, expensive to retrofit". On cost: model pricing spans roughly a **100×** range and *choosing the right model per task is the highest-impact optimization available* (40–70% savings). Both are configuration problems, not features, which is why the three levers below are ordered by yield rather than by effort.
 
 ### 12.1 Five pillars, one platform
 Traces (why) / metrics / logs / alerts / replays. **One** tracing platform (Langfuse self-hosted default), nested spans from day one — trivial to build, expensive to retrofit. Auto-analysis on every trace: cycle ≥3 → critical; spans >20 → grinding; cost >0.8×budget; one tool >60% of spans; ≥3 consecutive errors → critical; quality below baseline → review. Alert thresholds (priors to calibrate): success rate warn <93% / page <85%; latency p95 >10s/>30s; cost >2×/>5× baseline; tool errors >3%/>10%; budget 80%/95%. Debug protocol when something breaks: provider status first → segment failures (never read traces one by one) → diff 5 bad vs 5 good traces → tool health → fix + add a regression case. The console's first dashboard also carries the two metrics that justify the *service* rather than its health: **human-intervention frequency** and **acceptance rate**, plus savings against the manual baseline.
@@ -391,6 +405,8 @@ What survives the discount, and why the playbook was applied at all: the loop-le
 
 ---
 
-*Last updated: 2026-09-18 (v0.2.0 loop 1 — every load-bearing number now cites its source: goals carry pattern ids (P1/P75 unconditional), FRs carry the pattern band and the number behind them (P19 80% of tool errors, P29 60–80% of context tokens, P34, P39's 40/20/20/20, P12, P92), NFRs gained a "there because" column, the success criteria cite both the book's claim and our test.
+*Last updated: 2026-09-18 (v0.3.0 loop 2 — no orphan assertions left: §3 states the book's own recommendation and where we disagree with it (Ch.2's 30% rule, App. C's 3%), §4.1 says why the surface is 5 and not 40, §4.2 names the failure P26 prevents, §4.3 explains why enforcement cannot sit with the model, §7.5 leads with approval fatigue, §9 pairs every invariant with the mechanism that enforces it, §10 explicitly rejects P46–P60 and says why P49/P55 stay rejected, §§11–12 say what the book's two claims actually buy.
+
+*v0.2.0 loop 1 — every load-bearing number now cites its source: goals carry pattern ids (P1/P75 unconditional), FRs carry the pattern band and the number behind them (P19 80% of tool errors, P29 60–80% of context tokens, P34, P39's 40/20/20/20, P12, P92), NFRs gained a "there because" column, the success criteria cite both the book's claim and our test.
 
 *v0.1.1 review pass — self-reviewed against both source documents and the onegw/xdev/LeanKG surfaces; fixed dead cross-references and a superseded pointer; added the two idempotency layers and their record of truth (§4.2), the duplicate-write test and the Ch.12 recovery numbers (§8), Appendix A's calibration baseline table (§17), and Appendix B's extended discount of the source (§18); §16 re-headlined with the verification basis; D0 added for review ownership).*
