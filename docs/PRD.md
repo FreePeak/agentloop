@@ -1,12 +1,24 @@
 # agentloop — Product Requirements Document
 
-**Status:** draft for review · **Version:** 1.0.0 · **Date:** 2026-09-18
+**Status:** draft for review · **Version:** 1.0.1 · **Date:** 2026-09-18
 **Repo:** `github.com/FreePeak/agentloop` (branch `docs/prd-agentloop-service`, no commits yet)
 **Canonical architecture:** [`design.md`](../design.md) — this PRD is the status/scope SoT and summarizes its decisions; it never duplicates its detail.
 
 > The product is a **service and a contract**, not an app: agentloop runs bounded, budgeted, observable **agent loops** on behalf of other products, and the loop is bounded and metered by construction rather than by convention. Architecture source: *The 0→1 Loop Engineering Playbook (2026 Edition)* (ch. 1–13, App. A–G), applied with one rule — **every number in the book is a prior to calibrate against our own evals, never a spec.** The book's own review says its thresholds are asserted, not derived; §11 makes the calibration loop the product.
 
 ---
+
+### How to read this document
+
+| If you are | Read | Then |
+|---|---|---|
+| deciding whether to fund or build it | §23 (one-page summary), §1.1–§1.3 | §15, starting with D0 |
+| reviewing the design | §3, §4, §9 | §22 (this document's own weaknesses) |
+| about to write code | §13 + §13.1, §11.2, §17 | the cited `design.md` section for detail |
+| auditing the sources | §16, §18 | §20 (all 100 patterns accounted for) |
+| asking why a number is what it is | §17 | §11.5 (how it changes) |
+
+Section statuses, so nothing looks more settled than it is — **decided:** §§4.3, 7, 9, 13, 17 (and §17's own rule that no value is a spec); **draft pending review:** §§3.1, 15 (D1–D7 are the reviewer's to close); **v2 by design, listed so it cannot be mistaken for scope:** §§19, 21; **provenance and honesty:** §§16, 18, 20, 22, 23.
 
 ### Production checklist (the book's twelve moves, condensed)
 
@@ -47,7 +59,7 @@ The book's domain chapters say this explicitly (Ch.14–17): in coding, research
 | G4 | **Every number is a calibrated prior.** Model/step/cost/routing defaults ship as data with provenance; an eval run validates them | the report's *Numbers to know* table — and its "where to discount" section, which says the thresholds are asserted, not derived |
 | G5 | Costs are **metered per action and enforced before the action**, not discovered on the invoice | Ch.13 (*cost is the silent killer of agent projects*: $150k/mo bill of a "cheap" $0.50-per-run agent), P3, P76, P82 |
 
-The book's one law is adopted verbatim as the design law: every additional step **multiplies** cost, latency and failure probability. Therefore `MAX_STEPS` and `cost_budget` are economic instruments set per task type, not round numbers picked out of habit (`design.md` §1, §4).
+The book's one law is adopted verbatim as the design law: every additional step **multiplies** cost, latency and failure probability. Therefore `MAX_STEPS` and `cost_budget` are economic instruments set per task type, not round numbers picked out of habit (`design.md` §1's problem statement and §4's loop contract).
 
 ### 1.2 Non-goals (v1, explicit)
 
@@ -274,7 +286,7 @@ Per convention, deliberate shortcuts ship with a `ponytail:` comment naming the 
 
 ## 10. Multi-agent stance
 
-**Single agent in v1.** The book's own gate is adopted literally: add agents only for *10+ distinct tools, mixed model tiers, genuine parallelism, or context beyond one window* — otherwise the channel tax (`N(N−1)/2`) eats the win. When agents land (milestone 7), the shape is fixed: hierarchical, teams of 3–4, typed messages (`task|result|question|feedback`) with per-receiver FIFO, a role card per agent in version control (name, model tier, tools, prompt, I/O format, failure behavior), disagreement by stakes (vote / arbitrate on a stronger model / escalate with a highlighted diff), and an explicit lifecycle — no zombies. Stop rule: coordination messages above 30% of tokens means we added too many.
+**Single agent in v1 (Ch.7).** The book's own gate is adopted literally: add agents only for *10+ distinct tools, mixed model tiers, genuine parallelism, or context beyond one window* — otherwise the channel tax (`N(N−1)/2`) eats the win. When agents land (milestone 7), the shape is fixed: hierarchical, teams of 3–4, typed messages (`task|result|question|feedback`) with per-receiver FIFO, a role card per agent in version control (name, model tier, tools, prompt, I/O format, failure behavior), disagreement by stakes (vote / arbitrate on a stronger model / escalate with a highlighted diff), and an explicit lifecycle — no zombies. Stop rule: coordination messages above 30% of tokens means we added too many.
 
 What that means concretely is that App. B's whole multi-agent band (P46–P60) is **deliberately not adopted** in v1, and the reason is arithmetic rather than modesty: coordination cost grows quadratically with agent count (Ch.7), so the book's own gate is the only honest trigger — 10+ distinct tools, mixed model tiers, genuine parallelism, or context beyond a single window. We have five tools and one window. Two patterns are also rejected on merit even after M7: **P49 Ensemble** (3–5 agents voting) buys reliability at 3–5× compute, which is a trade the eval suite has to prove before we pay it, and **P55 Consensus** is reserved for irreversible decisions — our irreversible decisions go to a *human* gate (§7.5), not to a majority of models agreeing with each other.
 
@@ -332,7 +344,7 @@ Traces (why) / metrics / logs / alerts / replays. **One** tracing platform (Lang
 
 ## 13. Roadmap, status & acceptance
 
-The build order is `design.md` §17 (build order), kept 1:1 so there is one record, not two. The book's 30-day/8-week plan is a *schedule overlay*, not a second backlog.
+The build order is `design.md` §17 (build order), kept 1:1 so there is one record, not two. Its acceptance for each milestone is sharpened in the book's terms — every milestone lands on at least one pattern from App. B (M1: P1/P75; M2: P19/P29 + tracing; M3: P76; M4: P31–P34, P43; M5: P30/P68; M6: the eval harness of Ch.10) — and the book's 30-day/8-week plan is a *schedule overlay*, not a second backlog.
 
 | # | Milestone | Scope | Acceptance (from design.md §17, sharpened) | Status |
 |---|---|---|---|---|
@@ -384,6 +396,8 @@ Three of the twelve are the ones that decide whether this is a plan or a wish. *
 
 ## 14. Risks & mitigations
 
+These are the ways the book's own priors (Ch.1–13), accepted wholesale, would hurt us — each row is a book claim inverted, which is why the mitigation is usually a measurement rather than a design change.
+
 | Risk | Impact | Mitigation |
 |---|---|---|
 | **Threshold cargo-culting** — the book's priors (0.7/0.85/0.95, 3 attempts) shipped as if derived | silent quality/cost regressions that look like config | G4: every prior carries its source; §11.5 monthly re-derivation; console labels un-calibrated priors |
@@ -396,6 +410,8 @@ Three of the twelve are the ones that decide whether this is a plan or a wish. *
 | **Framework drift** — onegw's tiering/routing evolves | routing decisions silently change | routing is data (config) with a version; the eval gate catches behavior change |
 
 ## 15. Open decisions (owner + deadline)
+
+Every row here is a decision `design.md` §18 left open plus the two this PRD introduced (D3 tenancy, D7 memory backend). None of them blocks M0's exit except D1 — the runtime — and each is written as a recommendation with the section that argues for it, so a reviewer can disagree by citing a section rather than by rewriting one.
 
 | # | Decision | Recommendation | Owner | By |
 |---|---|---|---|---|
@@ -464,7 +480,7 @@ What survives the discount, and why the playbook was applied at all: the loop-le
 
 ---
 
-*Last updated: 2026-09-18 (v1.0.0 loop 9 — §23 (Appendix G) added: the one-page summary a reviewer can read alone; §22's fixes are folded into §11.2 (rungs, both retry shapes, injected double), §11.3 (flake census), §11.4 (promotion job is later), §5.1 FR-7 (timed-out approval escalates with the partial), §4 (interface-based registry), §13 (M3's parity half) and §17 (retention is ours).
+*v1.0.0 loop 9 — §23 (Appendix G) added: the one-page summary a reviewer can read alone; §22's fixes are folded into §11.2 (rungs, both retry shapes, injected double), §11.3 (flake census), §11.4 (promotion job is later), §5.1 FR-7 (timed-out approval escalates with the partial), §4 (interface-based registry), §13 (M3's parity half) and §17 (retention is ours).
 
 *v0.9.0 loop 8 — §22 (Appendix F): ten adversarial findings against this PRD, four of which changed the text (M3's cost claim needs a quality-holding subset, the containment suite now states its rung to the 50-case suite, a timed-out approval escalates with the partial synthesis, and the tool registry is declared interface-based so the acceptance suite can inject test doubles) and six carried as accepted risk with a named mechanism. §11.2 and §11.3 gained the missing size and flake-census artifacts.
 
