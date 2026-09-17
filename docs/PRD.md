@@ -1,6 +1,6 @@
 # agentloop — Product Requirements Document
 
-**Status:** draft for review · **Version:** 0.4.0 · **Date:** 2026-09-18
+**Status:** draft for review · **Version:** 0.5.0 · **Date:** 2026-09-18
 **Repo:** `github.com/FreePeak/agentloop` (branch `docs/prd-agentloop-service`, no commits yet)
 **Canonical architecture:** [`design.md`](../design.md) — this PRD is the status/scope SoT and summarizes its decisions; it never duplicates its detail.
 
@@ -194,7 +194,7 @@ The reason this table is non-negotiable comes from the book's architecture chapt
 | NFR-4 | Durability | resume from a checkpoint after a mid-run fault without re-firing a write | P8 Checkpoint Loop (serialize every 3–5 steps; critical for 30+ min runs) + P26 |
 | NFR-5 | Observability | every run replayable; every alert threshold from Ch.11 wired to one dashboard | Ch.11's five pillars with traces as the "why"; one platform only |
 | NFR-6 | Portability | `CGO_ENABLED=0` single binary; loop code trafficks only through onegw and (v1) the 5-tool registry | App. C: one abstraction layer, then swap implementations only within 3% on the same suite |
-| NFR-7 | Trace retention | 90 days; thresholds re-derived monthly (§11.5) | book prior; onegw's own `usage.retention_days` default is also 90 |
+| NFR-7 | Trace retention | 90 days; thresholds re-derived monthly (§11.5) | our choice, aligned with onegw's own 90-day default; the book sets no retention number |
 
 ## 6. API & data contract (v1 sketch)
 
@@ -316,7 +316,7 @@ Two book claims set the shape of this section. On observability: *logs tell you 
 Traces (why) / metrics / logs / alerts / replays. **One** tracing platform (Langfuse self-hosted default), nested spans from day one — trivial to build, expensive to retrofit. Auto-analysis on every trace: cycle ≥3 → critical; spans >20 → grinding; cost >0.8×budget; one tool >60% of spans; ≥3 consecutive errors → critical; quality below baseline → review. Alert thresholds (priors to calibrate): success rate warn <93% / page <85%; latency p95 >10s/>30s; cost >2×/>5× baseline; tool errors >3%/>10%; budget 80%/95%. Debug protocol when something breaks: provider status first → segment failures (never read traces one by one) → diff 5 bad vs 5 good traces → tool health → fix + add a regression case. The console's first dashboard also carries the two metrics that justify the *service* rather than its health: **human-intervention frequency** and **acceptance rate**, plus savings against the manual baseline.
 
 ### 12.2 Cost model
-`cost = (in×p_in + out×p_out) × iterations`, metered per span, enforced per action. Levers in order of yield: **routing by step type** (cheap tier for classify/extract/route, mid for reason/synthesize, strong only for judge/complex) → **prompt cache** on the static system+tools block → **response/tool cache** (exact hash; semantic only above a threshold validated against our own false-positive rate) → **correctness before cleverness**. Onegw already implements the first three; agentloop contributes the per-step routing decision and the budget enforcement, and the knee table (savings vs quality loss per incremental lever) is published in the console.
+`cost = (in×p_in + out×p_out) × iterations`, metered per span, enforced per action. Ch.13 names four cost strategies and orders them the same way (model tiering, then context/prompt reduction, then caching, then batching); our levers in order of yield: **routing by step type** (cheap tier for classify/extract/route, mid for reason/synthesize, strong only for judge/complex) → **prompt cache** on the static system+tools block → **response/tool cache** (exact hash; semantic only above a threshold validated against our own false-positive rate) → **correctness before cleverness**. Onegw already implements the first three; agentloop contributes the per-step routing decision and the budget enforcement, and the knee table (savings vs quality loss per incremental lever) is published in the console.
 
 ## 13. Roadmap, status & acceptance
 
@@ -366,7 +366,7 @@ Three of the twelve are the ones that decide whether this is a plan or a wish. *
 |---|---|---|
 | 1 | working ReAct agent + tracing | M1 containment core + M2 tracing start |
 | 2 | 10-case eval + recovery | §11.2 suite + Ch.12 resilience |
-| 3 | domain agent + demo | first real template (App. G row 2 or 4) on LeanKG/xdev tools. **Not taken from the book's week 3:** the 2-agent pipeline (M7), the semantic-cache cost target (v2), and the demo video — the console plus a published knee table is the artifact a service is judged on |
+| 3 | domain agent + demo | first real template (App. G row 2 or 4, spec’d in Appendix C) on LeanKG/xdev tools. **Not taken from the book's week 3:** the 2-agent pipeline (M7), the semantic-cache cost target (v2), and the demo video — the console plus a published knee table is the artifact a service is judged on |
 | 4 | portfolio / launch | console + gate in CI + a public README with the knee table |
 | 5–8 | production wrapper, supervisor, 50-case eval, ship | M4, M5, M6, M7 |
 
@@ -407,28 +407,30 @@ Three of the twelve are the ones that decide whether this is a plan or a wish. *
 
 One table, one rule: **nothing in the middle column is a spec.** Every value is a starting prior with its provenance in the third column, and the fourth column is the only legitimate way it changes.
 
+The book's own framing is the licence for that posture — it prints these numbers as "the book's stated defaults", with the instruction to *calibrate each on your own evals before trusting it*, and its weakest section is that the thresholds are **asserted, not derived** (0.85, 0.7, 0.95, 3 attempts, a 70% ceiling: plausible priors presented as rules). A PRD that copied them as requirements would be laundering someone else's guess into our contract. Hence: source column says where the number came from, calibration column says what would change it, and no default moves without an eval run in either direction.
+
 | Knob | v1 value | Source | Calibration |
 |---|---|---|---|
-| `max_steps` | **9** per run | book prior (6-step task + 30% headroom) | p95 staging completions × 1.3, monthly (§11.5) |
-| Wall-clock cap | **120 s** per run, excluding approval waits | App. G wrapper prior | p95 run time × 1.3 |
+| `max_steps` | **9** per run | Ch.1 (*Numbers to know*: p95 completion count from staging + 30% headroom — a 6-step agent gets 9) | p95 staging completions × 1.3, monthly (§11.5) |
+| Wall-clock cap | **120 s** per run, excluding approval waits | derived from the platform's own p95 (there is no book prior for wall-clock; App. G has per-template step/cost budgets and a `query_timeout: 30` on the SQL template, nothing more) | p95 run time × 1.3 |
 | `cost_budget` | **$1.00** default; per template $0.03–0.08 (haiku-tier) / $0.20–0.50 (sonnet-tier) | App. G rows 1–8 | observed cost per completed task at eval parity |
 | Daily ceiling | 20× the per-run budget, per tenant-day | derived | measured runs/day × p95 cost, plus headroom |
-| Pre-synthesis reserve | **10%** of budget | book prior | the knee table (§12.2) |
-| Dedup | hash `tool+canonical(args)` before execution; break after 2 identical in a row | book prior | prevented-waste rate, observed before loosening |
-| Cycle alert | **3** identical `(tool,args)` pairs | book prior (≈18% saved spend at 5k+ runs/day) | our own cycle rate; a default, not a law |
-| Context ceiling | **70%** of the window for state+history | book prior | measured degradation curve per model |
-| Compression cadence | every **5** iterations; last 5 turns verbatim | book prior | measured recall loss, not a schedule |
-| Tool result cap | **2,000** tokens (truncate at 4,000 chars, else summarize to 5 items) | book prior | compressible-token ratio measured by onegw's savers |
-| Visible tool count | **5** in v1, hard cap **15** | book prior | an addition needs a removal or an eval justification (§14) |
-| Retry | 3 attempts, base 1.0 s ×2, cap 60 s, jitter ×[0.5,1.5] | book prior | the observed transient-error distribution |
-| Circuit breaker | open at 5 failures / 60 s recovery / 2 half-open probes; per-tool 3 / 30 s | book prior | per-tool error rates |
-| Self-correction | **≤2** rounds, high-stakes outputs only | book prior | marginal quality per round |
-| HITL interrupt budget | **<10%** of runs; ~95% of errors caught; 2% of auto-approvals sampled; median approve <3 s = rubber-stamping | book prior | the measured confusion matrix — the target is the catch rate, not the interrupt rate |
-| Semantic cache similarity | **≥0.95**, and only after measuring *our* false positives (book: ~8% at 0.90, <1% at 0.95) | book prior | our own FP rate, per template |
-| Autonomy ramp | first 20 actions supervised → semi-auto above ~0.85 approval over 50+ → autonomous above ~0.95 over 100+ | book prior | the tenant's own history only |
-| Eval pass gate | `score ≥ 0.8` ∧ latency ≤ cap ∧ cost ≤ cap; deploys blocked below an ~85% suite pass rate | book prior | raise it as the suite matures, never lower it |
-| Alert thresholds | success <93% warn / <85% page; p95 >10 s / >30 s; cost >2× / >5× baseline; tool errors >3% / >10%; budget 80% / 95% | book prior | rolling baselines (§12.1) |
-| Trace retention | **90 days**; thresholds re-derived monthly; prod → eval dataset weekly | book prior | storage cost vs replay need |
+| Pre-synthesis reserve | **10%** of budget | Ch.4/13 (*numbers to know*: the budget split ends in a 10% buffer, and synthesis is forced once spend passes 90%) | the knee table (§12.2) |
+| Dedup | hash `tool+canonical(args)` before execution; break after 2 identical in a row | Ch.4/11 (*Numbers to know*: repetition guards, −18% wasted spend at 5,000+ runs/day) | prevented-waste rate, observed before loosening |
+| Cycle alert | **3** identical `(tool,args)` pairs | Ch.11 (*Numbers to know*: the same −18% figure) | our own cycle rate; a default, not a law |
+| Context ceiling | **70%** of the window for state+history | Ch.8 (*never fill more than 70% — 30% is the reasoning budget*; the book's shipped code compresses at 80%, i.e. its own text and code disagree by 10 points) | measured degradation curve per model |
+| Compression cadence | every **5** iterations; last 5 turns verbatim | Ch.8 (*Numbers to know*: compress every 5, keep the last 5 verbatim — a 40-step run keeps only 4–6 landmarks) | measured recall loss, not a schedule |
+| Tool result cap | **2,000** tokens (truncate at 4,000 chars, else summarize to 5 items) | Ch.6 (*Numbers to know*: result budget) | compressible-token ratio measured by onegw's savers |
+| Visible tool count | **5** in v1, hard cap **15** | Ch.6 (*keep 5–15; past 15 selection dilutes; a router cuts 30 → 3*) | an addition needs a removal or an eval justification (§14) |
+| Retry | 3 attempts, base 1.0 s ×2, cap 60 s, jitter ×[0.5,1.5] | Ch.12 (*Numbers to know* + `retry_with_backoff` code shape) — and the same row's rule: never blind-retry a 400 or a write | the observed transient-error distribution |
+| Circuit breaker | open at 5 failures / 60 s recovery / 2 half-open probes; per-tool 3 / 30 s | Ch.12 (*Numbers to know* + `CircuitBreaker(failure_threshold=5, recovery_timeout=60, half_open_max=2)`; the per-tool 3/30 s is the book's own "recommended") | per-tool error rates |
+| Self-correction | **≤2** rounds, high-stakes outputs only | Ch.12 (a critique pass costs about as much as generation, so two rounds triple that step; P61 catches 10–20% of mistakes) | marginal quality per round |
+| HITL interrupt budget | **<10%** of runs; ~95% of errors caught; 2% of auto-approvals sampled; median approve <3 s = rubber-stamping | Ch.9 | the measured confusion matrix — the target is the catch rate, not the interrupt rate |
+| Semantic cache similarity | **≥0.95**, and only after measuring *our* false positives (book: ~8% at 0.90, <1% at 0.95) | Ch.13 (P78; v2) | our own FP rate, per template |
+| Autonomy ramp | first 20 actions supervised → semi-auto above ~0.85 approval over 50+ → autonomous above ~0.95 over 100+ | Ch.9 | the tenant's own history only |
+| Eval pass gate | `score ≥ 0.8` ∧ latency ≤ cap ∧ cost ≤ cap; deploys blocked below an ~85% suite pass rate | Ch.10 | raise it as the suite matures, never lower it |
+| Alert thresholds | success <93% warn / <85% page; p95 >10 s / >30 s; cost >2× / >5× baseline; tool errors >3% / >10%; budget 80% / 95% | Ch.11 | rolling baselines (§12.1) |
+| Trace retention | **90 days**; thresholds re-derived monthly; prod → eval dataset weekly | our choice; onegw's `usage.retention_days` default agrees, and the book sets no retention number | storage cost vs replay need |
 
 Two warnings about this table. A value **is not calibrated because it has not broken yet** — the absence of an alert is not evidence. And the optimistic reviewer is the dangerous one: the knobs an optimist lowers (`max_steps`, a budget, a confidence floor) are exactly the knobs the containment suite (§11.2) exists to test.
 
@@ -449,10 +451,29 @@ What survives the discount, and why the playbook was applied at all: the loop-le
 
 ---
 
-*Last updated: 2026-09-18 (v0.4.0 loop 3 — the book's closing sections are now applied, not just cited: §13.1 maps all twelve "moves that carry the book" to a milestone and a test, the production checklist sits next to the goals, M1's acceptance names P1/P75 as its definition, and six cheap-but-premature patterns (P74, P49/P55, P78, P79, P88, P90) are listed as deliberately not built, each with its trigger.
+*Last updated: 2026-09-18 (v0.5.0 loop 4 — every row of the defaults table now names its chapter or number, the two genuinely non-book rows say so, and §19 (Appendix C) sets out the App. G template library as v2: per-template steps/tools/budget from the book, the trigger to add each, and the loop we would build — plus the three observations (3–5 tools, 5–12 steps, confirmation on the irreversible tool) that justify §4's five and §7.3's fail-closed policy table.
+
+*v0.4.0 loop 3 — the book's closing sections are now applied, not just cited: §13.1 maps all twelve "moves that carry the book" to a milestone and a test, the production checklist sits next to the goals, M1's acceptance names P1/P75 as its definition, and six cheap-but-premature patterns (P74, P49/P55, P78, P79, P88, P90) are listed as deliberately not built, each with its trigger.
 
 *v0.3.0 loop 2 — no orphan assertions left: §3 states the book's own recommendation and where we disagree with it (Ch.2's 30% rule, App. C's 3%), §4.1 says why the surface is 5 and not 40, §4.2 names the failure P26 prevents, §4.3 explains why enforcement cannot sit with the model, §7.5 leads with approval fatigue, §9 pairs every invariant with the mechanism that enforces it, §10 explicitly rejects P46–P60 and says why P49/P55 stay rejected, §§11–12 say what the book's two claims actually buy.
 
 *v0.2.0 loop 1 — every load-bearing number now cites its source: goals carry pattern ids (P1/P75 unconditional), FRs carry the pattern band and the number behind them (P19 80% of tool errors, P29 60–80% of context tokens, P34, P39's 40/20/20/20, P12, P92), NFRs gained a "there because" column, the success criteria cite both the book's claim and our test.
+
+## 19. Appendix C — v2 template library (App. G, adapted)
+
+The book ships eight copy-paste architectures in App. G. They are **not** a v1 deliverable: a template is prompt + tool allowlist + budget config, and the useful ones need a tool surface we deliberately do not have yet (a persistent memory tool, `post_review_comment`, `create_event`, document extraction). What v1 ships is the *machine that consumes a template*, so the format is fixed now and the contents arrive later.
+
+| App. G template | max_steps / budget (book) | Tools | Our trigger to add it | The loop we would build |
+|---|---|---|---|---|
+| 1 · Customer Support | 5 / $0.05, escalation at 0.7 | 3 | first external tenant with a KB | classify → retrieve (KB) → answer or escalate; P68 confidence routes to a human |
+| 2 · Data Analysis | 8 / $0.30, `query_timeout` 30 s, `max_rows` 100 | 3 | first analytics question worth answering in SQL | schema → read-only SELECT → plain-language result with caveats; read-only by construction (§7.3) |
+| 3 · Content Generation | 6 / $0.20, quality gate 0.85 | 4 | a real publishing workflow | generate → self-critique to ≥0.85 → revise; P61/P62, capped at 2 rounds |
+| 4 · Code Review | 10 / $0.50, ≤20 files | 4 | **first real template** (see §13's week 3) | diff → `repo_context` impact → findings with line numbers → comment; verify, don't generate (Ch.14) |
+| 5 · Scheduling | 6 / $0.03, `create_event` requires confirmation | 3 | a calendar surface exists | availability → propose → **confirm → write**; the purest P30/P62 case |
+| 6 · Monitoring & Alerting | 8 / $0.40, auto-escalate at 300 s | 5 | on-call handoff is wanted | alert → metrics/logs → severity → mitigation or incident; P75 must work under load (§11.2 case 4) |
+| 7 · Document Processing | 5 / $0.08, confidence 0.90, review queue | 5 | invoice/contract volume justifies it | classify → extract → validate → route; below 0.90 confidence goes to `needs_review` |
+| 8 · Multi-Agent Supervisor | 12 / $2.00 total, per-specialist models | 3 | never before §10's gate | delegate → collect → synthesize; blocked until M7 |
+
+Three observations that shaped §17's defaults rather than being copied from the table. The book's eight templates use **3–5 tools** — the same band as §4's five, which is the strongest single argument that a five-tool v1 is not under-scoped. Their **step budgets run 5–12** around our 9, so `max_steps: 9` sits inside the shape rather than under it. And every template that can write carries `requires_confirmation` on exactly the irreversible tool (`create_event`, `create_incident`) — which is §7.3's policy table derived from the book's own examples rather than from taste, and is why that table is fail-closed on unknown tools instead of permissive.
 
 *v0.1.1 review pass — self-reviewed against both source documents and the onegw/xdev/LeanKG surfaces; fixed dead cross-references and a superseded pointer; added the two idempotency layers and their record of truth (§4.2), the duplicate-write test and the Ch.12 recovery numbers (§8), Appendix A's calibration baseline table (§17), and Appendix B's extended discount of the source (§18); §16 re-headlined with the verification basis; D0 added for review ownership).*
