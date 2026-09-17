@@ -1,6 +1,6 @@
 # agentloop — Product Requirements Document
 
-**Status:** draft for review · **Version:** 0.8.0 · **Date:** 2026-09-18
+**Status:** draft for review · **Version:** 1.0.0 · **Date:** 2026-09-18
 **Repo:** `github.com/FreePeak/agentloop` (branch `docs/prd-agentloop-service`, no commits yet)
 **Canonical architecture:** [`design.md`](../design.md) — this PRD is the status/scope SoT and summarizes its decisions; it never duplicates its detail.
 
@@ -120,6 +120,8 @@ That is what the decisions below implement — `AgentBase` is the abstraction la
 
 Five tools is not an arbitrary small number; it is the book's own band. App. B puts the tool surface at **5–15** (P16 *Tool Router*, P23 *Tool Discovery*, P24 *Tool Doc Injection* for registries past that), and Ch.6's anti-pattern is *tool count explosion*: every tool past 15 dilutes selection and at 30+ "you will see agents using tool_17 when they should use tool_3". A 5-tool v1 therefore sits at the bottom of the band on purpose — the surface grows only when an eval shows the loop needs something it does not have, never because a tool was cheap to add.
 
+**The registry is interface-based, and that is load-bearing for the acceptance suite (§11.2):** cases 2, 4 and 5 register their own test doubles (a recorder-backed write tool, a deliberately slow tool, a poisoned retrieval source) through the same interface a real tool uses. "Five tools" describes the *production* surface, not the registry's type.
+
 Rules (Ch.6, `design.md` §5): typed envelope `ToolResult(success, data, message, metadata)`; errors typed and *actionable* (`timeout after 30s, try a simpler query`); name + `USE WHEN` + `DO NOT USE WHEN` + one example (the `DO NOT USE WHEN` clause is the highest-ROI prompt hour); 5–15 visible tools, router when the registry is larger; every write has a read twin; schema-validate before execution; result capped at 2,000 tokens; audit every call.
 
 `design.md` §18 (open questions) asks "which tools ship v1". Answer: **five**, each pointing at a service that already exists in this portfolio — no new backend is built for any of them.
@@ -179,7 +181,7 @@ The reason this table is non-negotiable comes from the book's architecture chapt
 - **FR-4 Loop guards** — dedup by `tool+canonical(args)` hash before execution; cycle detection at **3** identical `(tool,args)` pairs; unknown tool → typed error observation listing available tools; one tool call per ReAct turn. *(Ch.4: the Thought step is mandatory — skipping it costs 20–30% more tool-call errors for ~50–100 tokens, the cheapest trade in the book; Ch.1/9: confidence below 0.7 routes to a human.)*
 - **FR-5 Tool registry** — schema validation pre-execution, per-tool timeout, sandbox, audit record, 2,000-token result cap with summarize/truncate middleware, per-tool fallback rungs (full/reduced/minimal/unavailable). *(P19 Tool Validation catches ~80% of tool-call errors before the API call is paid for; P29 Tool Result Summarization saves 60–80% of context tokens; P17 Tool Fallback, P20 Tool Caching 15–30% hits, P21 Tool Rate Limiter, P22 Tool Sandboxing, P28 Tool Health Check.)*
 - **FR-6 Memory** — four tiers with the 70% context rule, landmark retention (decisions, recoveries, expensive outputs), rolling compression every 5 iterations, structured state with validation, **deletion API** for tenant/PII removal. *(P31–P45 are the book's memory band: P32 Landmark Memory keeps decisions verbatim, P34 Memory Compression frees 60–80% of context, P39 Context Budget is the 40/20/20/20 split, P40 Memory Eviction retains by value, P43–P45 are the typed state → validation → rollback chain.)*
-- **FR-7 Approval** — fail-closed policy table (`read → auto`, `update → auto_if_confident`, `send/delete/deploy/pay → always_approve`, unknown → `always_approve`), 30-minute timeout **denies**, batching + fatigue guard (median approve <3s means a lost human). *(Ch.9: approval fatigue is worse than no approval — batch, tier, auto-approve the routine; ~30% of approval interactions are *modifications*, which the book calls the highest-value training signal in the system, so a Modify response is a corrected action, never a rejection; P30 Confirmation Tool, P68 Confidence Scoring.)*
+- **FR-7 Approval** — fail-closed policy table (`read → auto`, `update → auto_if_confident`, `send/delete/deploy/pay → always_approve`, unknown → `always_approve`); a 30-minute timeout **denies the action** but returns the run as an **escalation carrying its partial synthesis** — denial is the policy answer, and the operator still gets what the loop learned (P100), batching + fatigue guard (median approve <3s means a lost human). *(Ch.9: approval fatigue is worse than no approval — batch, tier, auto-approve the routine; ~30% of approval interactions are *modifications*, which the book calls the highest-value training signal in the system, so a Modify response is a corrected action, never a rejection; P30 Confirmation Tool, P68 Confidence Scoring.)*
 - **FR-8 Idempotency** — fingerprint every write, check *before* executing, persist the key and the outcome; a retry re-reads the first attempt's result instead of re-firing. *(P26 Idempotent Tools: "one pattern standing between you and 2,400 duplicate refunds".)*
 - **FR-9 Kill & degrade** — `POST /v1/runs/{id}/kill` halts in ≤1 step boundary and returns the partial synthesis; the degrade ladder answers with honest copy ("based on training data, may be outdated"), never silence. *(P75 Kill Switch is the second unconditional pattern — "every production system" — and the book's instruction is to test it quarterly; P100 Graceful Handoff is the honest-copy half.)*
 - **FR-10 Traces & replay** — one trace per run, nested spans from the first commit, per-span tokens/cost/latency; replay in recorded / hybrid / live modes with a divergence flag (word-set similarity <0.9 flags divergence). *(Ch.11: "logs tell you what happened; traces tell you why" — the nested-span tracer is ~80 lines and "trivial to build, expensive to retrofit".)*
@@ -291,16 +293,24 @@ Scoring by type: exact, fuzzy, cosine, constraint-check, LLM-judge (stronger mod
 | # | Case | Pass |
 |---|---|---|
 | 1 | Runaway probe (a prompt designed to loop forever) | halts at the ceiling, returns labelled partial synthesis, records the exit reason |
-| 2 | Repeated identical write | second identical `(tool,args)` never re-fires; the idempotency key returns the first outcome |
+| 2 | Repeated identical write — **both retry shapes** | same `run_id`: the second identical `(tool,args)` never re-fires and returns the first outcome. New `run_id`, same intent: caught by the caller's idempotency key or the approval gate, never by luck |
 | 3 | Budget creep | at 90% spend the run forces synthesis; the "no progress = no spend" invariant ends a stalled loop |
 | 4 | Kill switch under load | kill lands inside one step boundary on a run with an in-flight tool call |
-| 5 | Injected prompt injection in retrieved content | policy table and budget unchanged; the injection is surfaced, not obeyed |
+| 5 | Injected prompt injection in retrieved content (test double registers the poisoned tool) | policy table and budget unchanged; the injection is surfaced, not obeyed |
 
-These run in CI as a 10-case suite completing in under two minutes, per the book's "an agent you cannot measure is an agent you cannot improve" rule.
+These five are the **M1 gate**, not the suite — the distinction matters because calling them "the containment suite" invites the reading that containment is covered. The suite has three rungs, and each has a size, an owner and a category mix:
+
+| Rung | Size | Categories | Gate |
+|---|---|---|---|
+| Containment (this table) | 5 cases | adversarial + regression | **M1** — a run that violates a ceiling cannot merge |
+| Full suite | 50 cases at M6, +10/week | happy 40–50% · edge 20–30% · adversarial 15–20% · regression 10–15% (Ch.10) | **M6** — deploy gate at ≥85% pass |
+| Production-derived | unbounded | adversarial, one case per incident (P99) | continuous — the suite grows from failures, never from a wish list |
+
+The five cases below are deliberately in the two categories a new loop fails first. If they pass and the 45 others do not exist yet, containment is covered and the product is not measured — which is the honest state of M1.
 
 ### 11.3 A/B discipline and flakiness
 
-Every config change runs the full suite with 3 runs per case, `p<0.05`, watching for adversarial regressions hiding under headline gains. Flaky cases get a 10× rerun, then a decision: temperature-0 or vote, mock the tool, loosen the scorer, or it is a real bug — never delete the signal. Budget: under 2 flaky cases per 50.
+Every config change runs the full suite with 3 runs per case, `p<0.05`, watching for adversarial regressions hiding under headline gains. A **monthly flake census** is a required artifact (how many cases flaked, which, and whether the count fell) — the book's "<2 of 50" target is worthless without something measuring it. Flaky cases get a 10× rerun, then a decision: temperature-0 or vote, mock the tool, loosen the scorer, or it is a real bug — never delete the signal. Budget: under 2 flaky cases per 50.
 
 ### 11.4 Deploy gate and the REFINE loop
 
@@ -329,7 +339,7 @@ The build order is `design.md` §17 (build order), kept 1:1 so there is one reco
 | M0 | Docs SoT | this PRD + `design.md` reviewed; decisions closed | the §15 open decisions have owners and dates; PRD footer stamped | **in progress** |
 | M1 | Containment core | LoopRunner + ToolRegistry + BudgetGuard + kill switch + runs API + `AgentBase` — i.e. the book's two **unconditional** patterns, P1 Bounded Loop and P75 Kill Switch, are the milestone's definition | §11.2 cases 1,2,3,4 pass in CI; **the kill switch is exercised quarterly** (book's instruction) and by every deploy smoke test | not started |
 | M2 | Guards + tracing | dedup/cycle/validation/2K cap, Tracer (nested spans), cycle alert, replay v1 | 3-layer repetition test passes; an injected fault is found by diffing traces; §11.2 case 5 | not started |
-| M3 | Planning | Planner/Replanner, parallel phases, tiered routing through onegw | a 5+-step task is ≥40% cheaper than single-tier ReAct at eval parity (±3%) | not started |
+| M3 | Planning | Planner/Replanner, parallel phases, tiered routing through onegw | a 5+-step task is ≥40% cheaper than single-tier ReAct **with no case scoring below the single-tier baseline by more than its eval tolerance** (the same 50-case suite run both ways, paired per case — the cost number is meaningless without this half) | not started |
 | M4 | Memory & state | 4 tiers, 70% rule, landmarks, checkpoints, deletion API | 20-iteration run holds the 70% rule; resume from step-5 checkpoint after a step-7 fault | not started |
 | M5 | HITL | ApprovalGate, audit, progressive autonomy counters, approval queue UI | <10% interruptions; sampling + anomaly review exercised; timeout denies | not started |
 | M6 | Evals & console | EvalRunner in CI, REFINE job, HTMX console (trajectory, spend, evals, kill) | deploys blocked on the full-suite gate; +10 cases/week; knee table published | not started |
@@ -433,7 +443,7 @@ The book's own framing is the licence for that posture — it prints these numbe
 | Autonomy ramp | first 20 actions supervised → semi-auto above ~0.85 approval over 50+ → autonomous above ~0.95 over 100+ | Ch.9 | the tenant's own history only |
 | Eval pass gate | `score ≥ 0.8` ∧ latency ≤ cap ∧ cost ≤ cap; deploys blocked below an ~85% suite pass rate | Ch.10 | raise it as the suite matures, never lower it |
 | Alert thresholds | success <93% warn / <85% page; p95 >10 s / >30 s; cost >2× / >5× baseline; tool errors >3% / >10%; budget 80% / 95% | Ch.11 | rolling baselines (§12.1) |
-| Trace retention | **90 days**; thresholds re-derived monthly; prod → eval dataset weekly | our choice; onegw's `usage.retention_days` default agrees, and the book sets no retention number | storage cost vs replay need |
+| Trace retention | **90 days**; thresholds re-derived monthly; production→eval promotion weekly (a later addition, not part of the M6 gate) | our choice; onegw's `usage.retention_days` default agrees, and the book sets no retention number | storage cost vs replay need |
 
 Two warnings about this table. A value **is not calibrated because it has not broken yet** — the absence of an alert is not evidence. And the optimistic reviewer is the dangerous one: the knobs an optimist lowers (`max_steps`, a budget, a confidence floor) are exactly the knobs the containment suite (§11.2) exists to test.
 
@@ -454,7 +464,11 @@ What survives the discount, and why the playbook was applied at all: the loop-le
 
 ---
 
-*Last updated: 2026-09-18 (v0.8.0 loop 7 — every external claim re-verified against onegw/xdev/LeanKG and `design.md`. Fixed: wrong `design.md` section pointers (§13→§15 API, §15→§17 build order, §16→§18 open questions, platform layer §6–12→§6–10), the fictional `execution` combo (onegw ships `tiny`/`planning`; `execution` is ours to define), the stale "onegw has no per-step routing" caveat (its task-aware reordering exists but ships off), design.md §18's different fifth tool (stated as a deliberate divergence instead of silently ignored), and three numeric drifts (`max_steps`, wall-clock, compression window). Added: the QC provenance of that sweep in §16.
+*Last updated: 2026-09-18 (v1.0.0 loop 9 — §23 (Appendix G) added: the one-page summary a reviewer can read alone; §22's fixes are folded into §11.2 (rungs, both retry shapes, injected double), §11.3 (flake census), §11.4 (promotion job is later), §5.1 FR-7 (timed-out approval escalates with the partial), §4 (interface-based registry), §13 (M3's parity half) and §17 (retention is ours).
+
+*v0.9.0 loop 8 — §22 (Appendix F): ten adversarial findings against this PRD, four of which changed the text (M3's cost claim needs a quality-holding subset, the containment suite now states its rung to the 50-case suite, a timed-out approval escalates with the partial synthesis, and the tool registry is declared interface-based so the acceptance suite can inject test doubles) and six carried as accepted risk with a named mechanism. §11.2 and §11.3 gained the missing size and flake-census artifacts.
+
+*v0.8.0 loop 7 — every external claim re-verified against onegw/xdev/LeanKG and `design.md`. Fixed: wrong `design.md` section pointers (§13→§15 API, §15→§17 build order, §16→§18 open questions, platform layer §6–12→§6–10), the fictional `execution` combo (onegw ships `tiny`/`planning`; `execution` is ours to define), the stale "onegw has no per-step routing" caveat (its task-aware reordering exists but ships off), design.md §18's different fifth tool (stated as a deliberate divergence instead of silently ignored), and three numeric drifts (`max_steps`, wall-clock, compression window). Added: the QC provenance of that sweep in §16.
 
 *v0.7.0 loop 6 — §21 (Appendix E): the four domain chapters mined for the *why* of each loop, and each mechanism tracked against what v1 already ships (coding: 4 of 5 in place; research: verification as a stage + labelled training-knowledge fallback; business process: exception path = §7.5; creative: the +30/+10/+3 curve = the ≤2-round cap and the ≥30-example rubric calibration rule).
 
@@ -565,5 +579,61 @@ Loop: **generate → evaluate against dimensions → find the weakest dimension 
 The chapter's warning is the one we have to carry into §11: **the loop only improves what the metric measures.** A rubric of readability scores produces clear, dull prose. So a rubric is calibrated against human ratings on **≥30 examples** before it gates anything — which is the same rule as §17's "no default without an eval run", applied to scoring functions instead of budgets.
 
 **Net effect on v1 scope: none, and that is the point.** Ch.15's verify stage is an invariant, Ch.16's exception path is §7.5, Ch.17's stopping rule is already a default, and Ch.14's loop is the one M1 can run. What the four chapters add is a v2 backlog with a *reason per item* rather than a fourth list of features.
+
+## 22. Appendix F — adversarial read: ten findings against this PRD
+
+Written the way an unfriendly reviewer would write it, then answered. Every finding is a real objection against the text as it stands; two of them changed the text (F3 → §11.2's rung table, F9 → §11.4's eval-scope correction). Findings with no fix are marked **accepted risk**, because pretending they are solved would be the first failure this section is meant to catch.
+
+**F1 — "Your own eval suite cannot test your headline claim."** §1.3 promises ≥40% lower cost *at eval parity*, and M3's acceptance is "a 5+-step task is ≥40% cheaper at parity (±3%)". Cost is measurable; **parity is not measured anywhere in §11.2** — the containment suite asserts that ceilings hold, not that quality did not move. A cheaper loop that degrades slightly would pass M3.
+**Fix:** the claim is only testable with a *quality-holding* subset (the same 50-case suite run under both configurations, scored per case, with a paired comparison), and §11.4 now says so. Until that exists, M3's number is aspirational and §13 labels it as such.
+
+**F2 — "Nine steps is a number you inherited, not derived."** §17 admits it (Ch.1's 6-step task + 30% headroom). For a LoopRunner whose entire job is bounding, the v1 default is someone else's task class. The monthly re-derivation (§11.5) is a promise, not a measurement.
+**Accepted risk, with a named fallback:** the first staging deployment sets `max_steps` from the observed p95 completion count, and until then the number is a *guard default*, not an optimization. What would make it wrong: a template whose tasks genuinely need 15 steps — then M3's tiering, not the ceiling, absorbs it.
+
+**F3 — "The containment suite is five cases where the book says fifty."** §11.2 presents five cases as milestone 1's acceptance; Ch.10 says 50 cases on day one across four categories. Five cases in one category is not a suite, and calling it "the containment acceptance suite" invites the reading that containment is covered.
+**Fix, applied:** §11.2 gains an explicit rung table — the 5 containment cases are the **M1 gate**, the 50-case four-category suite is the **M6 gate**, and the adversarial cases from production are what carry the suite past 50. The word "suite" now appears with its size attached.
+
+**F4 — "Non-determinism makes half your gates flaky."** A 50-case gate on a non-deterministic system needs a flakiness budget, and the book's own number (<2 of 50 cases) is a *target*, not a mechanism. With 3 runs per case and `p<0.05`, a single flaky case can block a deploy or, worse, teach the team to re-run until green.
+**Accepted risk, with a mechanism:** §11.3 already prescribes a 10× rerun, then a decision (temperature-0 or vote, mock the tool, loosen the case, delete it). The gap is that **nothing measures whether the suite's own flake rate is improving** — so §11.3 carries a monthly flake census as a required artifact, starting with the first suite.
+
+**F5 — "`confirm_action` at 30 minutes is a wall-clock ceiling in disguise."** Approval waits are excluded from the wall-clock cap (§17), and the gate denies on timeout — so a run parked on a slow human burns a slot, holds a goroutine, and then dies *with no partial answer*. That is exactly the "dead loop" §12.2 says a partial answer beats.
+**Fix, applied in the text:** a timed-out approval is an **escalation with the partial synthesis attached**, not a denial of the run's result. Denial is the *policy* answer; the operator still gets what was learned, which is also what P100 (Graceful Handoff) asks for.
+
+**F6 — "Your two idempotency layers are keyed differently and you did not notice."** onegw's dedup keys on the request (`Idempotency-Key`/`X-Request-Id`), xdev's policy keys on the *call*, and agentloop keys on `sha256(run_id + tool + canonical(args))`. A retry that changes only the run id defeats the durable layer while still burning a provider call.
+**Accepted risk, bounded:** the run id is *supposed* to be part of the key — a new run is a new intent — but the PRD never states it. §11.2 case 2 must therefore test *both* retry shapes: same run id (must not re-fire) and new run id (must be caught by the caller's own key or the approval gate). Named in the case list.
+
+**F7 — "Five tools cannot run your own M1 acceptance."** Case 2 needs a write tool pointed at a recorder, case 4 needs an in-flight tool call to kill, case 5 needs injected retrieval. The recorder and the injection source are **test doubles that live outside the five-tool surface**, and §4 says nothing about how a test injects a tool.
+**Fix, applied:** the registry is interface-based and the suite registers its own tools in tests. That is the boring answer, but it has to be written down, because "five tools" invites a reviewer to think the registry is closed.
+
+**F8 — "Multi-tenant seams that are only named are not seams."** §7.4 says v1 is single-tenant with the seam named; the schema (`run` table, audit, evals) would then need a `tenant_id` retrofit on every table — the exact retrofit §7.4 claims to avoid for PII.
+**Accepted risk with a cheap mitigation:** add `tenant_id` (default `"default"`) to the tables in M1, indexed, and never filter on it in v1. One column now, per §9's "deletion over addition" bias inverted deliberately because a migration is more expensive than a column.
+
+**F9 — "Retention is doing work nobody asked it to."** §17 sets 90-day trace retention and a weekly production→eval dataset promotion. Neither is required by any goal in §1.1, and both are quoted as if the book demanded them.
+**Fix, applied:** the footer/sources now say the retention number is ours (aligned with onegw's), and §11.4's promotion job is labelled a *later* addition rather than part of the eval gate.
+
+**F10 — "The document is 500 lines and the buildable part is not on the first page."** A reviewer who reads only §1 learns the goals; a reviewer who reads only §13 learns the plan; the numbers that would change either are in §17. The PRD is long because it is a doc of record, but nothing forces the reader to hold all of it.
+**Fix:** the production checklist and the goals table sit in the first ten lines, §13.1 maps scope to milestones, and §23 (Appendix G) is a 60-line summary a reviewer can read alone. If a section cannot be summarized there, it does not belong in this document.
+
+**What this appendix is not.** It is not a risk register (that is §14), and it is not a substitute for a reviewer who disagrees: it is the list of objections I could *prove* against my own text, written before someone else did.
+
+## 23. Appendix G — one-page summary
+
+**What it is.** `agentloop` runs bounded, budgeted, observable agent loops as a service: goal + budget in, answer / handoff / escalation out. It is not a framework (model and tool SDKs sit behind `AgentBase`) and it is not a product surface — the console is 1:1 with the API and exists so an operator can answer questions in that order.
+
+**Why it exists.** A request–response service cannot do work whose next step depends on the current one; a naive loop does it expensively, without ceilings, without idempotency, and without a way to tell convergence from an expensive wrong answer. The book's own domain chapters agree: the bottleneck is context management, verification and the integration surface, never generation. That is what this service owns.
+
+**Non-negotiables (the two unconditional patterns).** A bounded loop (**P1**) and a kill switch (**P75**) are M1's definition, not hardening. Six exits, typed: step, wall-clock, dollar, confidence floor, progress stall, consecutive failures. Success and stopping are separate fields on every run.
+
+**Shape.** Router (cheap) → Planner (strong) → Executor (ReAct, one tool call per turn, guards) → Evaluate (predicated) → memory write; one writer per `(run, resource)`; read-only fan-out. Five tools at v1 (`repo_search`, `repo_context`, `web_search`, `run_tests`, `write_file`) over LeanKG and xdev. Models and token saving go through onegw; enforcement stays in agentloop (§4.3).
+
+**Numbers** (all priors, all in §17, none of them specs): 9 steps · 120 s · $1.00/run · 90% forced synthesis · 70% context ceiling · compress every 5 · 2,000-token results · 3 identical `(tool,args)` = cycle · retry 3 with jitter, never a write or a 400 · CB 5/60 s/2 · eval pass 0.8 + latency + cost caps · <10% interrupts · 90-day traces.
+
+**Proof.** Containment suite (5 cases, M1 gate) → 50-case four-category suite (M6 gate, +10/week, deploy blocked below 85%) → production incidents become cases. Identity: the durable write test (§11.2 case 2, both retry shapes). Every default's provenance is in §17; every default moves only with an eval run.
+
+**Build order.** M0 docs → M1 containment core → M2 guards + tracing → M3 planning + tiering → M4 memory → M5 HITL → M6 evals + console → M7 multi-agent (conditional on §10's gate). The eval suite is the moat; M6 exists so it cannot ship last by accident.
+
+**Open before code.** D0 (owner — **you**) then D1–D7 (§15). The one decision that has to be made before M0 exits is D1 (runtime), and the honest framing is that Go buys the deployment envelope, not correctness — §3.1 records the price.
+
+**Read next.** §13.1 (scope → milestones), §17 (defaults), §18 (where to discount the source), §22 (this document's own weaknesses).
 
 *v0.1.1 review pass — self-reviewed against both source documents and the onegw/xdev/LeanKG surfaces; fixed dead cross-references and a superseded pointer; added the two idempotency layers and their record of truth (§4.2), the duplicate-write test and the Ch.12 recovery numbers (§8), Appendix A's calibration baseline table (§17), and Appendix B's extended discount of the source (§18); §16 re-headlined with the verification basis; D0 added for review ownership).*
