@@ -1,10 +1,31 @@
 # agentloop — Product Requirements Document
 
-**Status:** draft for review · **Version:** 0.3.0 · **Date:** 2026-09-18
+**Status:** draft for review · **Version:** 0.4.0 · **Date:** 2026-09-18
 **Repo:** `github.com/FreePeak/agentloop` (branch `docs/prd-agentloop-service`, no commits yet)
 **Canonical architecture:** [`design.md`](../design.md) — this PRD is the status/scope SoT and summarizes its decisions; it never duplicates its detail.
 
 > The product is a **service and a contract**, not an app: agentloop runs bounded, budgeted, observable **agent loops** on behalf of other products, and the loop is bounded and metered by construction rather than by convention. Architecture source: *The 0→1 Loop Engineering Playbook (2026 Edition)* (ch. 1–13, App. A–G), applied with one rule — **every number in the book is a prior to calibrate against our own evals, never a spec.** The book's own review says its thresholds are asserted, not derived; §11 makes the calibration loop the product.
+
+---
+
+### Production checklist (the book's twelve moves, condensed)
+
+Kept here because it is the shortest honest summary of what *production-ready* means for this service. The full audit — each move mapped to a milestone and a test — is §13.1.
+
+| | Move | One-line test |
+|---|---|---|
+| 1 | **Name the termination** before the body | step, wall-clock, dollar, confidence, stall, consecutive-failure exits all exist and are typed |
+| 2 | **Separate success from stopping** | a success condition is not an exit reason — both are fields on the run |
+| 3 | **Route models by step type** | the highest-yield cost lever in the book (40–70%) — M3's parity test proves ours |
+| 4 | **Treat tools as an API surface** | validated inputs, structured outputs, do/don't descriptions, side-effect flags |
+| 5 | **Compress state, never history** | decisions stay verbatim, raw turns get evicted |
+| 6 | **Idempotency on every write** | fingerprint → check → persist, keyed by the run |
+| 7 | **Trace steps, not just results** | per-step tokens, cost, latency, confidence |
+| 8 | **Build the eval suite first** | the suite is the moat, not the loop |
+| 9 | **Budget the loop, not the request** | per-run *and* per-day, forced synthesis at 90% |
+| 10 | **Ask the human less than 10% of the time** | tier by reversibility, threshold by confidence, sample auto-approvals |
+| 11 | **Prefer fewer agents** | channels grow as `N(N−1)/2` — §10's gate stays shut |
+| 12 | **Verify, don't generate harder** | quality is bought in the verification stage, not in a bigger model |
 
 ---
 
@@ -304,13 +325,36 @@ The build order is `design.md` §15, kept 1:1 so there is one record, not two. T
 | # | Milestone | Scope | Acceptance (from design.md §15, sharpened) | Status |
 |---|---|---|---|---|
 | M0 | Docs SoT | this PRD + `design.md` reviewed; decisions closed | §15 decisions have owners and dates; PRD footer stamped | **in progress** |
-| M1 | Containment core | LoopRunner + ToolRegistry + BudgetGuard + kill switch + runs API + `AgentBase` | §11.2 cases 1,2,3,4 pass in CI | not started |
+| M1 | Containment core | LoopRunner + ToolRegistry + BudgetGuard + kill switch + runs API + `AgentBase` — i.e. the book's two **unconditional** patterns, P1 Bounded Loop and P75 Kill Switch, are the milestone's definition | §11.2 cases 1,2,3,4 pass in CI; **the kill switch is exercised quarterly** (book's instruction) and by every deploy smoke test | not started |
 | M2 | Guards + tracing | dedup/cycle/validation/2K cap, Tracer (nested spans), cycle alert, replay v1 | 3-layer repetition test passes; an injected fault is found by diffing traces; §11.2 case 5 | not started |
 | M3 | Planning | Planner/Replanner, parallel phases, tiered routing through onegw | a 5+-step task is ≥40% cheaper than single-tier ReAct at eval parity (±3%) | not started |
 | M4 | Memory & state | 4 tiers, 70% rule, landmarks, checkpoints, deletion API | 20-iteration run holds the 70% rule; resume from step-5 checkpoint after a step-7 fault | not started |
 | M5 | HITL | ApprovalGate, audit, progressive autonomy counters, approval queue UI | <10% interruptions; sampling + anomaly review exercised; timeout denies | not started |
 | M6 | Evals & console | EvalRunner in CI, REFINE job, HTMX console (trajectory, spend, evals, kill) | deploys blocked on the full-suite gate; +10 cases/week; knee table published | not started |
 | M7 | Multi-agent (conditional) | supervisor + specialists, typed bus, role cards | only after §10's gate is met; coordination <30% of tokens | conditional |
+
+### 13.1 The twelve moves that carry the book — where each one lands
+
+The playbook closes with twelve moves it claims carry the whole book. This PRD is only honest if every one of them can be pointed at a milestone, so each is mapped below. Nine are build items; three are structural and are listed as such rather than smuggled in as features.
+
+| # | Move | Where it lands | Status |
+|---|---|---|---|
+| 1 | **Name the termination** — exit before body: step, wall-clock, dollar, confidence floor, stall detector, consecutive failures | M1 `LoopRunner`: six exits, each a typed `ExitReason` on the run row and in the trace | build, M1 |
+| 2 | **Separate success from stopping** — "inbox is empty" is success, not termination | M1: `Success` (the goal predicate) and `ExitReason` (why we stopped) are separate fields; the containment test for case 1 asserts a *labelled partial*, not a silent stop | build, M1 |
+| 3 | **Route models by step type** — 40–70% | M3 through onegw combos (`planning`/`execution`/`tiny`); the acceptance is the ≥40% parity number in M3 | build, M3 |
+| 4 | **Treat tools as an API surface** — validated inputs, structured outputs, ≤5K tokens, do/don't descriptions, side-effect flags | M1/M2 `ToolRegistry`: P19 validation, P29 result cap (2,000 tokens), `write?` flag per tool, description template with a **"DO NOT USE WHEN"** clause + one example (the book's 30–40% tool-selection number) | build, M1–M2 |
+| 5 | **Compress state, never history** — summarise near the ceiling, keep decisions verbatim, evict raw turns | M4: 70% rule, landmarks verbatim, compression every 5 iterations | build, M4 |
+| 6 | **Idempotency on every write** (P26) | M1: fingerprint → check → persist-before-execute, plus the two-layer contract in §4.2 | build, M1 |
+| 7 | **Trace steps, not just results** — per-step tokens, cost, latency, confidence | M2 `Tracer`: nested spans, whitespace-trimmed prompts, one line per span | build, M2 |
+| 8 | **Build the eval suite first** — 50→200 cases, four categories, score+latency+cost gates | M6 is gated on the suite existing *before* any domain template ships; §11.2's containment suite is the M1 subset of it | build, M6 (earliest cases in M1) |
+| 9 | **Budget the loop, not the request** — per-run + daily, force synthesis at 90% | M1 `BudgetGuard`: pre-action check, 10% pre-synthesis reserve, daily ceiling independent of the per-run one | build, M1 |
+| 10 | **Ask the human less than 10% of the time** — tier by reversibility, threshold by confidence, sample auto-approvals | M5: policy table, autonomy counters, `approvals` table as *training data* (the book's framing: approvals are labelled data for the day the gate is automated) — so the table ships in M1 and is filled in M5 | schema M1, behaviour M5 |
+| 11 | **Prefer fewer agents** | Structural: §10 states the gate; M7 is conditional and the PRD does not schedule it | structure, §10 |
+| 12 | **Verify, don't generate harder** — citation checking, test running, rubric scoring, capped self-critique | Structural + build: every template in the v2 template library (Appendix C) ends in a verification stage; `SelfCritique` is capped at 2 rounds (§17); P61 is the mechanism | structure (v2 templates), build M6 |
+
+Three of the twelve are the ones that decide whether this is a plan or a wish. **Move 8** is why M6 exists as a milestone rather than a follow-up, **move 9** is why `BudgetGuard` is in M1 and not "hardening later", and **move 12** is why the v2 template library (Appendix C) is specified to end in eval-shaped predicates rather than in "return the answer". The remaining nine are ordinary engineering; they are listed anyway, because a PRD that skips them is how "bounded loop" becomes a comment in a for-statement.
+
+**Also from the book's closing pages, deliberately not built in v1** — a short list so a reviewer can tell omission from oversight: **P74 Canary Deployment** (prompt changes ship at 5% traffic for 24–48 h — needs real traffic; v1 gate is the eval suite), **P49/P55** (ensemble/consensus, §10), **P78 Semantic Caching** (v2, and only after *our* false-positive rate is measured — the book's own 0.90 → 8% FP figure is the reason), **P79 Batch Processing** (no high-volume uniform workload yet), **P88 Deferred Computation** (no off-peak tier to shift to), and **P90 Cold Start Optimization** (a Go binary that talks to onegw has nothing to warm beyond one JSON parse). Each of these is a *cheap* pattern that becomes expensive if adopted before its trigger; naming the trigger is the whole point of this paragraph.
 
 **Definition of done for M1–M6:** the milestone's acceptance passes in CI, the status column here is updated in the same commit as the work, and each acceptance becomes a named eval case — never a prose claim.
 
@@ -405,7 +449,9 @@ What survives the discount, and why the playbook was applied at all: the loop-le
 
 ---
 
-*Last updated: 2026-09-18 (v0.3.0 loop 2 — no orphan assertions left: §3 states the book's own recommendation and where we disagree with it (Ch.2's 30% rule, App. C's 3%), §4.1 says why the surface is 5 and not 40, §4.2 names the failure P26 prevents, §4.3 explains why enforcement cannot sit with the model, §7.5 leads with approval fatigue, §9 pairs every invariant with the mechanism that enforces it, §10 explicitly rejects P46–P60 and says why P49/P55 stay rejected, §§11–12 say what the book's two claims actually buy.
+*Last updated: 2026-09-18 (v0.4.0 loop 3 — the book's closing sections are now applied, not just cited: §13.1 maps all twelve "moves that carry the book" to a milestone and a test, the production checklist sits next to the goals, M1's acceptance names P1/P75 as its definition, and six cheap-but-premature patterns (P74, P49/P55, P78, P79, P88, P90) are listed as deliberately not built, each with its trigger.
+
+*v0.3.0 loop 2 — no orphan assertions left: §3 states the book's own recommendation and where we disagree with it (Ch.2's 30% rule, App. C's 3%), §4.1 says why the surface is 5 and not 40, §4.2 names the failure P26 prevents, §4.3 explains why enforcement cannot sit with the model, §7.5 leads with approval fatigue, §9 pairs every invariant with the mechanism that enforces it, §10 explicitly rejects P46–P60 and says why P49/P55 stay rejected, §§11–12 say what the book's two claims actually buy.
 
 *v0.2.0 loop 1 — every load-bearing number now cites its source: goals carry pattern ids (P1/P75 unconditional), FRs carry the pattern band and the number behind them (P19 80% of tool errors, P29 60–80% of context tokens, P34, P39's 40/20/20/20, P12, P92), NFRs gained a "there because" column, the success criteria cite both the book's claim and our test.
 
