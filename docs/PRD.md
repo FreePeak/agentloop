@@ -1,6 +1,6 @@
 # agentloop — Product Requirements Document
 
-**Status:** draft for review · **Version:** 0.1.1 · **Date:** 2026-09-18
+**Status:** draft for review · **Version:** 0.2.0 · **Date:** 2026-09-18
 **Repo:** `github.com/FreePeak/agentloop` (branch `docs/prd-agentloop-service`, no commits yet)
 **Canonical architecture:** [`design.md`](../design.md) — this PRD is the status/scope SoT and summarizes its decisions; it never duplicates its detail.
 
@@ -14,15 +14,17 @@ A request–response service cannot do work where the next step depends on what 
 
 **agentloop** is one Go service that takes a goal + budget and returns an answer, a structured handoff, or an explicit escalation. What it sells is not the loop; every team writes one in a week. What it sells is the **containment and the measurements around it**: a hard ceiling, an idempotent write path, a per-action meter, a trajectory you can re-run, and an eval suite that gates every change.
 
+The book's domain chapters say this explicitly (Ch.14–17): in coding, research, business-process and creative agents alike, *the bottleneck is never generation — it is context management, verification and the integration surface*. A service that only calls a model is a wrapper; the parts that pay are the context budget, the verification stage and the audit trail. That, not the ReAct loop, is what v1 builds and what the licence of the code should reflect.
+
 ### 1.1 Goals
 
 | # | Goal | Playbook ref |
 |---|---|---|
-| G1 | One canonical loop: `observe → reason → act → evaluate`, with **evaluation as a distinct phase** and an explicit owner for exhaustion (`escalate_to_human`) | Ch.1 |
-| G2 | Two execution modes — **ReAct** for unpredictable steps, **Plan-and-Execute** for structured multi-step work — with a **hybrid default** (plan per phase, ReAct inside a phase) | Ch.4, Ch.5 |
-| G3 | **Production by construction:** bounded loop + kill switch non-optional, idempotent writes, cost circuit breaker, traces + replay, eval-gated deploys | Ch.10–13, App. B |
-| G4 | **Every number is a calibrated prior.** Model/step/cost/routing defaults ship as data with provenance; an eval run validates them | report §"Where to discount" |
-| G5 | Costs are **metered per action and enforced before the action**, not discovered on the invoice | Ch.13, P3/P76–P83 |
+| G1 | One canonical loop: `observe → reason → act → evaluate`, with **evaluation as a distinct phase** and an explicit owner for exhaustion (`escalate_to_human`) | Ch.1 (*the cycle is observe → reason → act → evaluate*), P1, P100 |
+| G2 | Two execution modes — **ReAct** for unpredictable steps, **Plan-and-Execute** for structured multi-step work — with a **hybrid default** (plan per phase, ReAct inside a phase) | Ch.4's six failure modes, Ch.5 (*replanning after every step is essential, not optional*), P12 |
+| G3 | **Production by construction:** bounded loop + kill switch non-optional, idempotent writes, cost circuit breaker, traces + replay, eval-gated deploys | Ch.10–13; P1 + P75 (the two patterns the index marks unconditional), P3, P26 |
+| G4 | **Every number is a calibrated prior.** Model/step/cost/routing defaults ship as data with provenance; an eval run validates them | the report's *Numbers to know* table — and its "where to discount" section, which says the thresholds are asserted, not derived |
+| G5 | Costs are **metered per action and enforced before the action**, not discovered on the invoice | Ch.13 (*cost is the silent killer of agent projects*: $150k/mo bill of a "cheap" $0.50-per-run agent), P3, P76, P82 |
 
 The book's one law is adopted verbatim as the design law: every additional step **multiplies** cost, latency and failure probability. Therefore `MAX_STEPS` and `cost_budget` are economic instruments set per task type, not round numbers picked out of habit (`design.md` §1, §4).
 
@@ -38,16 +40,18 @@ The book's one law is adopted verbatim as the design law: every additional step 
 
 | Metric | Target | How measured |
 |---|---|---|
-| Loop containment | **0** runs exceeding `max_steps`, `cost_budget`, or wall-clock; 0 duplicate side-effect writes without an idempotency key | §11.2 cases 1–4, §8 duplicate-write test |
-| Partial-answer honesty | 100% of budget-exhausted runs return a *labelled* partial synthesis, never a silent empty result | §11.2 case 1 |
-| Cost vs. naive baseline | ≥40% lower cost per completed task at eval parity (budgeted target, book prior 40–70%) | §11 eval A/B, §12 knee table |
-| Reliability | ≥98% on the first use case before a second lands (book: reliability before features) | §11.4 deploy gate |
-| Eval coverage | 50 cases across 4 categories day one; +10/week from production incidents | §11.4 REFINE loop |
-| Cost discipline | per-run + daily ceilings enforced at 90% with forced synthesis; the service never aborts at 100% | §12.2 BudgetGuard |
+| Loop containment | **0** runs exceeding `max_steps`, `cost_budget`, or wall-clock; 0 duplicate side-effect writes without an idempotency key | §11.2 cases 1–4, §8 duplicate-write test · book: P1 (*every loop has a maximum step count. No exceptions*), P75 |
+| Partial-answer honesty | 100% of budget-exhausted runs return a *labelled* partial synthesis, never a silent empty result | §11.2 case 1 · book: P3 (*halt and return the best result so far*) |
+| Cost vs. naive baseline | ≥40% lower cost per completed task at eval parity (budgeted target; the book's prior is 40–70% from routing alone) | §11 eval A/B, §12 knee table · book: Ch.5 (Opus plan / Sonnet execute / Haiku replan ≈50% cheaper) |
+| Reliability | ≥98% on the first use case before a second lands (book: reliability before features) | §11.4 deploy gate · book: Ch.18 (*a 95% success rate means 1 in 20 users has a bad experience*) |
+| Eval coverage | 50 cases across 4 categories day one; +10/week from production incidents | §11.4 REFINE loop · book: Ch.10 (*evals before agent: 50 cases day one*); P99 (*each thumbs-down becomes an eval case*) |
+| Cost discipline | per-run + daily ceilings enforced at 90% with forced synthesis; the service never aborts at 100% | §12.2 BudgetGuard · book: P3, P83 |
 
 ## 2. Framework mapping (App. A)
 
-The playbook's five named frameworks are used as **names for phases we already run**, not as new subsystems. Rule of use: wrong **answer** → LOOP/REFINE; wrong **path** → CHAIN/AGENT; cannot **operate** it → SCALE.
+The playbook's five named frameworks are used as **names for phases we already run**, not as new subsystems. The book's own one-line instruction is the rule of use (App. A): *use it to name the phases of a loop you already run* — LOOP for quality, AGENT for side effects, CHAIN for decomposition, REFINE for iteration on a draft, SCALE for the platform underneath.
+
+The diagnostic attached to it is the reason the mapping earns its place in a PRD: a loop whose **answer** is wrong needs LOOP/REFINE (re-reason, or refine the output); a loop whose **path** is wrong needs CHAIN/AGENT (decompose differently, change what it is allowed to touch); a loop you **cannot operate** needs SCALE (the platform work in §§6–12 of `design.md`). Three symptoms, three different next commits — and the most common mistake the book names is treating a SCALE symptom (no traces, no budget) as a prompt problem.
 
 | Frame | Where it lives in agentloop |
 |---|---|
@@ -90,6 +94,8 @@ The user's stated direction is **Go service + HTMX UI**; `design.md` §16 left t
 **Runtime risk, stated honestly:** the book's code shapes (asyncio fan-out, Python SDK tool-use) do not port line-for-line; Go buys the deployment envelope and the portfolio's operational habits, and costs the SDK's reference implementations. That trade is only defensible because §11 (evals) measures it — if Go's loop plumbing delays the eval suite past milestone 2, the decision is wrong and gets revisited in §15.
 
 ## 4. Tool-use engineering + v1 integration surface
+
+Five tools is not an arbitrary small number; it is the book's own band. App. B puts the tool surface at **5–15** (P16 *Tool Router*, P23 *Tool Discovery*, P24 *Tool Doc Injection* for registries past that), and Ch.6's anti-pattern is *tool count explosion*: every tool past 15 dilutes selection and at 30+ "you will see agents using tool_17 when they should use tool_3". A 5-tool v1 therefore sits at the bottom of the band on purpose — the surface grows only when an eval shows the loop needs something it does not have, never because a tool was cheap to add.
 
 Rules (Ch.6, `design.md` §5): typed envelope `ToolResult(success, data, message, metadata)`; errors typed and *actionable* (`timeout after 30s, try a simpler query`); name + `USE WHEN` + `DO NOT USE WHEN` + one example (the `DO NOT USE WHEN` clause is the highest-ROI prompt hour); 5–15 visible tools, router when the registry is larger; every write has a read twin; schema-validate before execution; result capped at 2,000 tokens; audit every call.
 
@@ -138,30 +144,30 @@ Rule: a write is keyed, checked and recorded by agentloop. Gateway dedup and san
 
 ### 5.1 Functional (v1)
 
-- **FR-1 Runs API** — submit a goal with `context`, `template?`, `max_steps?`, `cost_budget?`, `confirmations?`, `idempotency_key`; receive a run handle; poll/stream status.
-- **FR-2 Bounded loop** — enforce step ceiling, wall-clock ceiling, per-run and daily dollar ceilings, confidence floor, progress-stall detector, max-consecutive-failure ceiling; every exit is logged with its reason.
-- **FR-3 Hybrid planning** — Router classifies; Planner emits 3–7 one-sentence steps with success criteria and dependency marks; Replanner runs after *every* surprising step (binary `CONTINUE`/`REPLAN`), not only on error.
-- **FR-4 Loop guards** — dedup by `tool+canonical(args)` hash before execution; cycle detection at **3** identical `(tool,args)` pairs; unknown tool → typed error observation listing available tools; one tool call per ReAct turn.
-- **FR-5 Tool registry** — schema validation pre-execution, per-tool timeout, sandbox, audit record, 2,000-token result cap with summarize/truncate middleware, per-tool fallback rungs (full/reduced/minimal/unavailable).
-- **FR-6 Memory** — four tiers with the 70% context rule, landmark retention (decisions, recoveries, expensive outputs), rolling compression every 5 iterations, structured state with validation, **deletion API** for tenant/PII removal.
-- **FR-7 Approval** — fail-closed policy table (`read → auto`, `update → auto_if_confident`, `send/delete/deploy/pay → always_approve`, unknown → `always_approve`), 30-minute timeout **denies**, batching + fatigue guard (median approve <3s means a lost human).
-- **FR-8 Idempotency** — fingerprint every write, check *before* executing, persist the key and the outcome; a retry re-reads the first attempt's result instead of re-firing.
-- **FR-9 Kill & degrade** — `POST /v1/runs/{id}/kill` halts in ≤1 step boundary and returns the partial synthesis; the degrade ladder answers with honest copy ("based on training data, may be outdated"), never silence.
-- **FR-10 Traces & replay** — one trace per run, nested spans from the first commit, per-span tokens/cost/latency; replay in recorded / hybrid / live modes with a divergence flag.
-- **FR-11 Evals** — 4-category suite, scoring functions by type, pass = `score ≥ 0.8 ∧ latency ≤ cap ∧ cost ≤ cap`, CI gate, JSON report.
-- **FR-12 Operator console** — HTMX pages: run list + trajectory viewer, live step feed, budget/spend rollups, approval queue, eval report, kill button ("if you cannot see the trajectory, you cannot tell convergence from an expensive wrong answer").
+- **FR-1 Runs API** — submit a goal with `context`, `template?`, `max_steps?`, `cost_budget?`, `confirmations?`, `idempotency_key`; receive a run handle; poll/stream status. *(P92 Status Updates: the book claims 10× longer waits are tolerated when progress is visible — this is why the API streams instead of returning a single blocking response.)*
+- **FR-2 Bounded loop** — enforce step ceiling, wall-clock ceiling, per-run and daily dollar ceilings, confidence floor, progress-stall detector, max-consecutive-failure ceiling; every exit is logged with its reason. *(P1 Bounded Loop is one of the two patterns the book's index marks unconditional — "every production agent"; P2 Early Exit, P4 Convergence Check, P5 Oscillation Detector, P8 Checkpoint Loop and P15 Adaptive Step Limit are its companions here.)*
+- **FR-3 Hybrid planning** — Router classifies; Planner emits 3–7 one-sentence steps with success criteria and dependency marks; Replanner runs after *every* surprising step (binary `CONTINUE`/`REPLAN`), not only on error. *(P12 Conditional Loop: classify first — simple gets ~3 steps and a cheap model, complex gets ~15 and a premium one; P11 Parallel Loop cuts wall-clock 60–80% on independent sub-tasks.)*
+- **FR-4 Loop guards** — dedup by `tool+canonical(args)` hash before execution; cycle detection at **3** identical `(tool,args)` pairs; unknown tool → typed error observation listing available tools; one tool call per ReAct turn. *(Ch.4: the Thought step is mandatory — skipping it costs 20–30% more tool-call errors for ~50–100 tokens, the cheapest trade in the book; Ch.1/9: confidence below 0.7 routes to a human.)*
+- **FR-5 Tool registry** — schema validation pre-execution, per-tool timeout, sandbox, audit record, 2,000-token result cap with summarize/truncate middleware, per-tool fallback rungs (full/reduced/minimal/unavailable). *(P19 Tool Validation catches ~80% of tool-call errors before the API call is paid for; P29 Tool Result Summarization saves 60–80% of context tokens; P17 Tool Fallback, P20 Tool Caching 15–30% hits, P21 Tool Rate Limiter, P22 Tool Sandboxing, P28 Tool Health Check.)*
+- **FR-6 Memory** — four tiers with the 70% context rule, landmark retention (decisions, recoveries, expensive outputs), rolling compression every 5 iterations, structured state with validation, **deletion API** for tenant/PII removal. *(P31–P45 are the book's memory band: P32 Landmark Memory keeps decisions verbatim, P34 Memory Compression frees 60–80% of context, P39 Context Budget is the 40/20/20/20 split, P40 Memory Eviction retains by value, P43–P45 are the typed state → validation → rollback chain.)*
+- **FR-7 Approval** — fail-closed policy table (`read → auto`, `update → auto_if_confident`, `send/delete/deploy/pay → always_approve`, unknown → `always_approve`), 30-minute timeout **denies**, batching + fatigue guard (median approve <3s means a lost human). *(Ch.9: approval fatigue is worse than no approval — batch, tier, auto-approve the routine; ~30% of approval interactions are *modifications*, which the book calls the highest-value training signal in the system, so a Modify response is a corrected action, never a rejection; P30 Confirmation Tool, P68 Confidence Scoring.)*
+- **FR-8 Idempotency** — fingerprint every write, check *before* executing, persist the key and the outcome; a retry re-reads the first attempt's result instead of re-firing. *(P26 Idempotent Tools: "one pattern standing between you and 2,400 duplicate refunds".)*
+- **FR-9 Kill & degrade** — `POST /v1/runs/{id}/kill` halts in ≤1 step boundary and returns the partial synthesis; the degrade ladder answers with honest copy ("based on training data, may be outdated"), never silence. *(P75 Kill Switch is the second unconditional pattern — "every production system" — and the book's instruction is to test it quarterly; P100 Graceful Handoff is the honest-copy half.)*
+- **FR-10 Traces & replay** — one trace per run, nested spans from the first commit, per-span tokens/cost/latency; replay in recorded / hybrid / live modes with a divergence flag (word-set similarity <0.9 flags divergence). *(Ch.11: "logs tell you what happened; traces tell you why" — the nested-span tracer is ~80 lines and "trivial to build, expensive to retrofit".)*
+- **FR-11 Evals** — 4-category suite, scoring functions by type, pass = `score ≥ 0.8 ∧ latency ≤ cap ∧ cost ≤ cap`, CI gate, JSON report. *(Ch.10: the remedy for confident incorrectness; P61 Self-Critique catches 10–20% of mistakes for almost nothing, P62 Rubric Scoring, P64 Citation Verification, P65 Output Validation.)*
+- **FR-12 Operator console** — HTMX pages: run list + trajectory viewer, live step feed, budget/spend rollups, approval queue, eval report, kill button ("if you cannot see the trajectory, you cannot tell convergence from an expensive wrong answer"). *(P91 Progressive Disclosure: summary first, evidence and reasoning trace behind a disclosure — most users never open them; P94 Explanation Mode presents the reasoning in plain language for the audit case; P92 Status Updates in the live feed.)*
 
 ### 5.2 Non-functional
 
-| ID | Requirement | Target |
-|---|---|---|
-| NFR-1 | Containment | 0 runs exceed any configured ceiling (enforced pre-action, tested) |
-| NFR-2 | Latency | API p95 acknowledges a run in <300 ms; step latency p95 reported and baselined, not just the run |
-| NFR-3 | Memory | RSS bounded by construction (`debug.SetMemoryLimit` backstop, bounded queues/windows/output sinks), cell-checked on run state |
-| NFR-4 | Durability | resume from a checkpoint after a mid-run fault without re-firing a write |
-| NFR-5 | Observability | every run replayable; every alert threshold from Ch.11 wired to one dashboard |
-| NFR-6 | Portability | `CGO_ENABLED=0` single binary; loop code trafficks only through onegw and (v1) the 5-tool registry |
-| NFR-7 | Trace retention | 90 days; thresholds re-derived monthly (§11.5) |
+| ID | Requirement | Target | There because |
+|---|---|---|---|
+| NFR-1 | Containment | 0 runs exceed any configured ceiling (enforced pre-action, tested) | P1/P3/P75 — the book's 20 × $0.05 × 10,000 users = $10,000/min runaway figure |
+| NFR-2 | Latency | API p95 acknowledges a run in <300 ms; step latency p95 reported and baselined, not just the run | P92/P81 — 10× wait tolerance is bought with visible progress, not with a faster loop |
+| NFR-3 | Memory | RSS bounded by construction (`debug.SetMemoryLimit` backstop, bounded queues/windows/output sinks), cell-checked on run state | portfolio envelope (onegw's ≤100 MB contract), not the book — the book assumes a server, we assume a box |
+| NFR-4 | Durability | resume from a checkpoint after a mid-run fault without re-firing a write | P8 Checkpoint Loop (serialize every 3–5 steps; critical for 30+ min runs) + P26 |
+| NFR-5 | Observability | every run replayable; every alert threshold from Ch.11 wired to one dashboard | Ch.11's five pillars with traces as the "why"; one platform only |
+| NFR-6 | Portability | `CGO_ENABLED=0` single binary; loop code trafficks only through onegw and (v1) the 5-tool registry | App. C: one abstraction layer, then swap implementations only within 3% on the same suite |
+| NFR-7 | Trace retention | 90 days; thresholds re-derived monthly (§11.5) | book prior; onegw's own `usage.retention_days` default is also 90 |
 
 ## 6. API & data contract (v1 sketch)
 
@@ -173,8 +179,8 @@ Rule: a write is keyed, checked and recorded by agentloop. Gateway dedup and san
 | `GET` | `/v1/runs/{id}` | status, trajectory, spend, spans |
 | `POST` | `/v1/runs/{id}/approve` · `/modify` · `/reject` | human decision on a paused gate; timeout denies |
 | `POST` | `/v1/runs/{id}/kill` | the kill switch (P75) — tested quarterly, and by every deploy smoke test |
-| `GET` | `/v1/runs/{id}/events` | SSE step feed and webhook delivery for runs >5s (10× wait tolerance) |
-| `GET` | `/admin/api/v1/*` | console reads: runs, traces, budgets, evals, approval queue |
+| `GET` | `/v1/runs/{id}/events` | SSE step feed and webhook delivery for runs >5s (P92: *"Searching 3 databases…"* — the book's claim is 10× longer waits tolerated when progress is visible) |
+| `GET` | `/admin/api/v1/*` | console reads: runs, traces, budgets, evals, approval queue (paths follow onegw's console convention so both services read the same way) |
 
 Stores: runs+checkpoints (SQLite/pgvector-ready), traces/spans (one platform, Langfuse self-hosted as the default backend), exact+semantic caches (in-process + Redis when shared), eval cases + golden sets, audit log (append-only). Every span carries `(in×p_in + out×p_out)` at a **versioned price table** so BudgetGuard and the console agree to the cent.
 
@@ -385,4 +391,6 @@ What survives the discount, and why the playbook was applied at all: the loop-le
 
 ---
 
-*Last updated: 2026-09-18 (v0.1.1 review pass — self-reviewed against both source documents and the onegw/xdev/LeanKG surfaces; fixed dead cross-references and a superseded pointer; added the two idempotency layers and their record of truth (§4.2), the duplicate-write test and the Ch.12 recovery numbers (§8), Appendix A's calibration baseline table (§17), and Appendix B's extended discount of the source (§18); §16 re-headlined with the verification basis; D0 added for review ownership).*
+*Last updated: 2026-09-18 (v0.2.0 loop 1 — every load-bearing number now cites its source: goals carry pattern ids (P1/P75 unconditional), FRs carry the pattern band and the number behind them (P19 80% of tool errors, P29 60–80% of context tokens, P34, P39's 40/20/20/20, P12, P92), NFRs gained a "there because" column, the success criteria cite both the book's claim and our test.
+
+*v0.1.1 review pass — self-reviewed against both source documents and the onegw/xdev/LeanKG surfaces; fixed dead cross-references and a superseded pointer; added the two idempotency layers and their record of truth (§4.2), the duplicate-write test and the Ch.12 recovery numbers (§8), Appendix A's calibration baseline table (§17), and Appendix B's extended discount of the source (§18); §16 re-headlined with the verification basis; D0 added for review ownership).*
