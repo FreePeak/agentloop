@@ -1,6 +1,6 @@
 # agentloop — Product Requirements Document
 
-**Status:** draft for review · **Version:** 0.6.0 · **Date:** 2026-09-18
+**Status:** draft for review · **Version:** 0.7.0 · **Date:** 2026-09-18
 **Repo:** `github.com/FreePeak/agentloop` (branch `docs/prd-agentloop-service`, no commits yet)
 **Canonical architecture:** [`design.md`](../design.md) — this PRD is the status/scope SoT and summarizes its decisions; it never duplicates its detail.
 
@@ -451,7 +451,9 @@ What survives the discount, and why the playbook was applied at all: the loop-le
 
 ---
 
-*Last updated: 2026-09-18 (v0.6.0 loop 5 — §20 (Appendix D) accounts for all 100 of the book's patterns: 54 adopted with the milestone that tests them, 29 deferred with a named adoption trigger, 17 rejected for now with a reason. No silent omissions.
+*Last updated: 2026-09-18 (v0.7.0 loop 6 — §21 (Appendix E): the four domain chapters mined for the *why* of each loop, and each mechanism tracked against what v1 already ships (coding: 4 of 5 in place; research: verification as a stage + labelled training-knowledge fallback; business process: exception path = §7.5; creative: the +30/+10/+3 curve = the ≤2-round cap and the ≥30-example rubric calibration rule).
+
+*v0.6.0 loop 5 — §20 (Appendix D) accounts for all 100 of the book's patterns: 54 adopted with the milestone that tests them, 29 deferred with a named adoption trigger, 17 rejected for now with a reason. No silent omissions.
 
 *v0.5.0 loop 4 — every row of the defaults table now names its chapter or number, the two genuinely non-book rows say so, and §19 (Appendix C) sets out the App. G template library as v2: per-template steps/tools/budget from the book, the trigger to add each, and the loop we would build — plus the three observations (3–5 tools, 5–12 steps, confirmation on the irreversible tool) that justify §4's five and §7.3's fail-closed policy table.
 
@@ -520,5 +522,43 @@ Grouped by what they protect, each one pointing at where it is tested:
 Multi-agent band rows not deferred so much as **rejected on merit until the gate opens**: P48 Debate, P49 Ensemble, P50 Specialist Routing, P51 Reviewer-Writer, P52 Hierarchical Delegation, P53 Blackboard, P54 Auction, P55 Consensus, P56 Agent Pool, P57 Agent Lifecycle, P58 Message Bus, P59 Role Rotation. The book's own worked example says *start with 2–3 agents, not 10*, and our gate (§10) is stricter still: M7 is conditional, and P49 (3–5 agents voting at 3–5× compute) and P55 (majority approval on irreversible decisions) each need an eval to justify their price. Our irreversible decisions go to a human gate, not to a majority of models.
 
 Four more are rejected for v1 on cost/benefit rather than category: **P74 Canary Deployment** (needs real traffic; the eval suite is our gate), **P78 Semantic Caching** (v2 — and only after measuring *our* false-positive rate, since the book's own 0.90 threshold carries ~8% FPs), **P79 Batch Processing** (no high-volume uniform workload), **P88 Deferred Computation** (no off-peak tier), **P90 Cold Start Optimization** (a Go binary talking to onegw has nothing to warm). That is the honest total: **54 adopted, 29 deferred with a trigger, 17 rejected for now with a reason** — 100, no silent omissions.
+
+## 21. Appendix E — domain chapters (14–17): what each loop would raise here
+
+The four implementation chapters are the book's argument that the loop *shape* depends on the domain. None of them is v1 work — the five tools in §4 are generic — but each one is cheap to honour now and expensive to retrofit later: every mechanism below either requires a loop capability this PRD already ships, or a tool it already names. The column that matters is the last one.
+
+### Coding (Ch.14) — the chapter this PRD was written inside
+
+The chapter's loop is **write code → run tests → fix failures → repeat, ≤3 attempts**; whole-file rewrites only under 200 lines; search-and-replace is the default edit strategy; context gathering is the bottleneck, so use targeted search with token budgets rather than full reads (AST-level extraction cuts context 60–80%).
+
+| The chapter's mechanism | What it needs from agentloop | Status |
+|---|---|---|
+| Write-test-fix with a hard 3-attempt cap | a **cycle budget per sub-goal**, not just a per-run step ceiling | gap → §9 invariant 1 (no progress = no spend) covers the failure; the cap itself is a v1 config (`max_attempts`) and must be in the code, not only the prompt |
+| Search before read; never load the repo | the 70% context rule plus retrieval over a real graph (§3.1, P33) | **already in v1** |
+| AST-level extraction, not file dumps | LeanKG `context` verb returning an element's AST-aware neighbourhood | **already in v1** (`repo_context`, §4) |
+| `run_tests` in a sandbox | a write tool with a restricted workspace and a typed result | **already in v1** (tool 4) |
+| Verify the edit, not the intention | the evaluate phase must run the test result through a predicate before the loop continues | **already an invariant** (§9, invariant 2) |
+
+That overlap is not a coincidence: the portfolio's own harness (xdev) is the execution surface, so this chapter's loop is the one v1 can run end to end on day one. It is also why M1's first template is Code Review (§19, row 4).
+
+### Research (Ch.15) — verification is a stage, not a hope
+
+Loop: **decompose → search → read → synthesize → verify → cite**. The book measures the cost of skipping verification: unverified agents fabricate citations **15–25%** of the time; with verification, under **3%**. Claims survive at support **>0.8** (cited), **>0.5** (caveated), below that removed or flagged; uncited claims are treated as unverified by default.
+
+The transferable rule is bigger than research: **treat the model's training knowledge as an uncited source and label it as such.** An answer that falls back on training data for a time-sensitive fact must say so — the book calls the alternative "a hallucination machine dressed as a research tool". Our degrade ladder (§5.1 FR-9) already uses exactly that copy; this chapter is where the *reason* comes from.
+
+### Business process (Ch.16) — the exception path is the product
+
+Loop: **trigger → extract/validate → apply rules → execute → handle exceptions → record**. The chapter's economics are the argument for the HITL design in §7.5: these agents deliver the highest year-one ROI in the book (300–700%; a worked 633% with 52-day payback), and the value sits in **the 20% of cases that take 80% of human time**. A partial agent that compresses 30 minutes to 8 is a win even when it is not full automation — which is the same shape as our "labelled partial synthesis beats a dead loop".
+
+Two mechanisms worth stealing in v2: the **automation score** (volume, consistency, data availability, error tolerance; ≥25/30 automate, 15–24 partial, <15 skip) as a *routing* decision for whether a template is worth building, and the **resumable human task** (`yield HumanTask(step, context)`, resume on answer) — which is how a process loop survives an approval without holding a goroutine.
+
+### Creative (Ch.17) — measure the rubric, not the vibe
+
+Loop: **generate → evaluate against dimensions → find the weakest dimension → refine it → re-evaluate**, stopping when every dimension clears its threshold or the improvement is marginal. The two numbers that matter: quality gains **+30% / +10% / +3%** across drafts 2–4, and gains under **0.05** between rounds mean stop — "beyond 3 revisions, the agent starts editing in circles". That is the origin of §17's `Self-correction ≤2 rounds, high-stakes only` and of P4/P5 in the ledger.
+
+The chapter's warning is the one we have to carry into §11: **the loop only improves what the metric measures.** A rubric of readability scores produces clear, dull prose. So a rubric is calibrated against human ratings on **≥30 examples** before it gates anything — which is the same rule as §17's "no default without an eval run", applied to scoring functions instead of budgets.
+
+**Net effect on v1 scope: none, and that is the point.** Ch.15's verify stage is an invariant, Ch.16's exception path is §7.5, Ch.17's stopping rule is already a default, and Ch.14's loop is the one M1 can run. What the four chapters add is a v2 backlog with a *reason per item* rather than a fourth list of features.
 
 *v0.1.1 review pass — self-reviewed against both source documents and the onegw/xdev/LeanKG surfaces; fixed dead cross-references and a superseded pointer; added the two idempotency layers and their record of truth (§4.2), the duplicate-write test and the Ch.12 recovery numbers (§8), Appendix A's calibration baseline table (§17), and Appendix B's extended discount of the source (§18); §16 re-headlined with the verification basis; D0 added for review ownership).*
