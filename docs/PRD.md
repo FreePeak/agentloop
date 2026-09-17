@@ -1,6 +1,6 @@
 # agentloop — Product Requirements Document
 
-**Status:** draft for review · **Version:** 0.7.0 · **Date:** 2026-09-18
+**Status:** draft for review · **Version:** 0.8.0 · **Date:** 2026-09-18
 **Repo:** `github.com/FreePeak/agentloop` (branch `docs/prd-agentloop-service`, no commits yet)
 **Canonical architecture:** [`design.md`](../design.md) — this PRD is the status/scope SoT and summarizes its decisions; it never duplicates its detail.
 
@@ -52,7 +52,7 @@ The book's one law is adopted verbatim as the design law: every additional step 
 ### 1.2 Non-goals (v1, explicit)
 
 - **Not** a model trainer or a fine-tuning pipeline.
-- **Not** a new agent framework: model/tool SDKs sit behind `AgentBase`; the HTTP contract (App. C §"one abstraction layer, then swap implementations only within 3% on the same suite") is the moat, not the loop code.
+- **Not** a new agent framework: model/tool SDKs sit behind `AgentBase`; the HTTP contract (the *Numbers to know* row for framework migration — "run both through the same suite: within 3% ship the custom version" — with App. C's 12-dimension scoring matrix behind it) is the moat, not the loop code.
 - **Not** a domain prompt library: domain behavior ships as **versioned config** (`template`, `TemplateVersion`) using the eight App. G shapes, so a template change is reviewable and eval-gated like code.
 - **Not** multi-tenant SaaS in v1 (single-tenant deployment; §7.4 names the seam).
 - **Not** a chat product. The HTMX console is an operator surface, never an end-user UX.
@@ -80,7 +80,7 @@ The diagnostic attached to it is the reason the mapping earns its place in a PRD
 | `AGENT` (Assess-Navigate-Generate-Execute-Track) | runs with real side effects (writes, deploys, payments) — approval gates on |
 | `CHAIN` (Chunk-Hypothesize-Act-Inspect-Next) | Planner phases; the decompose/debug path |
 | `REFINE` (Review-Evaluate-Fix-Iterate-Narrow-Export) | the eval loop, and self-correction on high-stakes outputs only (≤2 rounds) |
-| `SCALE` (Separate-Cache-Async-Log-Evaluate) | the platform layer: §§6–12 of `design.md` |
+| `SCALE` (Separate-Cache-Async-Log-Evaluate) | the platform layer: `design.md` §§6–10 (its own §2 labels that range "platform layer") |
 
 ## 3. Architecture summary
 
@@ -100,14 +100,14 @@ Full detail and the request flow live in [`design.md`](../design.md) §3–§6. 
 
 The book's recommendation is explicit and it is *not* "write it in Go": for a **production** system, start custom rather than framework-first (Ch.7), wrap frameworks in an abstraction layer so they can be swapped (App. C), and migrate only when the replacement scores within 3% on the same eval suite. It also warns where the framework money goes: LangChain/LangGraph/CrewAI "add debugging complexity" in production.
 
-That is what the decisions below implement — `AgentBase` is the abstraction layer, onegw is the model transport we refuse to rewrite, and the parts the book says are load-bearing (bounds, budgets, traces, eval) are ours. The user's stated direction is **Go service + HTMX UI**; `design.md` §16 left the runtime open. The PRD takes the direction as decided so the build order can be planned, and records the trade-off:
+That is what the decisions below implement — `AgentBase` is the abstraction layer, onegw is the model transport we refuse to rewrite, and the parts the book says are load-bearing (bounds, budgets, traces, eval) are ours. The user's stated direction is **Go service + HTMX UI**; `design.md` §18 (open questions) left the runtime open. The PRD takes the direction as decided so the build order can be planned, and records the trade-off:
 
 | Layer | Decision | Why / cost |
 |---|---|---|
 | Service | **Go 1.25**, `net/http` mux with method+pattern routes, `CGO_ENABLED=0` single binary | matches the rest of the portfolio (onegw, xdev, LeanKG) and the deployment envelope; the book is runtime-agnostic (its code is Python pseudocode), so this is a portfolio decision, not a book one — stated that way instead of dressed up as technique |
 | Loop | Go goroutine pool + `context` deadlines; one goroutine per phase, `errgroup` for fan-out | implements P11 Parallel Loop (60–80% wall-clock cut on independent work) and Ch.5's 40–60% phase-parallel figure; replaces `asyncio.gather` with the same semantics plus explicit cancellation |
 | Models | talk to **onegw** (OpenAI-compatible `/v1/chat/completions` + `/v1/messages`) | already the portfolio's LLM gateway: combo fallback chains, token savers, usage/cost rollups, per-key pools — none of which agentloop should re-implement |
-| Tiers / routing | **onegw combos**, not agentloop code (`planning`, `execution`, `tiny`, plus a fail-open combo); the model list comes from `GET /v1/models` | implements *route models by task type* as gateway config instead of our code; App. B's `Model Tiers` pattern = this plus agentloop's per-step `task_type` label. Caveat: onegw has no per-step routing decision today (its issue #44), so agentloop picks the combo per step from its own versioned, eval-gated table and lets onegw route *within* the tier |
+| Tiers / routing | **onegw combos**, not agentloop code (`planning`, `tiny`, plus a fail-open combo); the model list comes from `GET /v1/models` — and **one combo is ours to add** (`execution`, the mid tier between them, since onegw ships only `tiny`/`planning` today) | implements *route models by task type* as gateway config instead of our code; App. B's `Model Tiers` pattern = this plus agentloop's per-step `task_type` label. Caveat: onegw's own task-aware combo reordering landed but ships **off by default** (`server.task_routing`), so agentloop picks the combo per step from its own versioned, eval-gated table and lets onegw route *within* the tier — if `task_routing` is ever enabled portfolio-wide, agentloop's table becomes the second decision and must be reconciled in M3 |
 | Prompt cache / token saving | **onegw `[saver]`** (inject + external compress), not agentloop code | the provider-side prompt cache covers the static system+tools prefix; onegw's savers are the gateway-side half |
 | Persistence | SQLite (WAL) for runs/checkpoints/evals/audit; pgvector when a tenant needs it | implements P8 Checkpoint Loop (durable state every 3–5 steps) and P42 Memory Versioning (state replay for debugging); LeanKG sets the single-binary precedent |
 | UI | **HTMX over server-rendered templates**, no CDN | matches onegw's admin console discipline; the console's job is P91 Progressive Disclosure (summary first, evidence behind a disclosure) and P94 Explanation Mode — both of which are just markup, so a client-side framework would buy nothing |
@@ -122,7 +122,7 @@ Five tools is not an arbitrary small number; it is the book's own band. App. B p
 
 Rules (Ch.6, `design.md` §5): typed envelope `ToolResult(success, data, message, metadata)`; errors typed and *actionable* (`timeout after 30s, try a simpler query`); name + `USE WHEN` + `DO NOT USE WHEN` + one example (the `DO NOT USE WHEN` clause is the highest-ROI prompt hour); 5–15 visible tools, router when the registry is larger; every write has a read twin; schema-validate before execution; result capped at 2,000 tokens; audit every call.
 
-`design.md` §16 asks "which tools ship v1". Answer: **five**, each pointing at a service that already exists in this portfolio — no new backend is built for any of them.
+`design.md` §18 (open questions) asks "which tools ship v1". Answer: **five**, each pointing at a service that already exists in this portfolio — no new backend is built for any of them.
 
 | # | Tool | Backing surface | Write? | Notes |
 |---|---|---|---|---|
@@ -131,6 +131,8 @@ Rules (Ch.6, `design.md` §5): typed envelope `ToolResult(success, data, message
 | 3 | `web_search` | onegw provider `kind = "searxng"` (`<name>/query`) | read | no separate search integration; results come back pre-formatted |
 | 4 | `run_tests` | `xdev rpc` (JSONL over stdio) running in a **restricted** `--add-dir` workspace | **yes** (sandboxed) | the verification half of the write-test-fix loop (Ch.14, ≤3 attempts); never a raw shell tool in v1 |
 | 5 | `write_file` | `xdev rpc` file tools | **yes** | read twin = `repo_context`; approval gate by policy (§7.3); idempotency key on every call (§4.2) |
+
+**Divergence from `design.md` §18, stated on purpose:** `design.md`'s starting set is *"3 reads + 1 search + 1 ticket/incident writer"*. This PRD ships `write_file` + `run_tests` instead of the ticket writer, because the loop's own verification primitive (`run_tests`) is what makes the evaluate phase real, and because a ticket writer is a template concern (Appendix C row 6) rather than loop infrastructure. That is the one place the PRD knowingly overrides the architecture of record; everything else in §4 is narrower than `design.md`, not different from it.
 
 **Why five and not forty (Ch.6 / App. B):** the book's rule is *tool quality determines agent quality*, and it puts the working set at 5–15 tools with a router past it. What it is protecting is not token cost but **selection accuracy**: past ~15 tools the model reaches for `tool_17` when it meant `tool_3`, and every schema is paid on every step. Five is the bottom of that band on purpose — it is a budget spent deliberately, and a new tool has to earn its slot (§14).
 
@@ -163,7 +165,7 @@ The reason this table is non-negotiable comes from the book's architecture chapt
 | Concern | Owner | Rule |
 |---|---|---|
 | Enforcement (bounds, budgets, approval, kill) | **agentloop** | never delegated to the model, the sandbox, or the gateway |
-| Model routing / token saving / fallback | **onegw** | agentloop sends the tier (`planning`/`execution`/`tiny`) per step; onegw picks the leg, saves tokens, records usage |
+| Model routing / token saving / fallback | **onegw** | agentloop sends the tier (`planning`/`execution`/`tiny`, the middle one added by us) per step; onegw picks the leg, saves tokens, records usage |
 | Execution + file mutation | **xdev rpc** | sandboxed, `--add-dir` restricted, timeout- and watchdog-bounded, audited by agentloop |
 | Knowledge retrieval + memory | **LeanKG** | the only place that owns the code graph and long-term recall |
 
@@ -193,12 +195,12 @@ The reason this table is non-negotiable comes from the book's architecture chapt
 | NFR-3 | Memory | RSS bounded by construction (`debug.SetMemoryLimit` backstop, bounded queues/windows/output sinks), cell-checked on run state | portfolio envelope (onegw's ≤100 MB contract), not the book — the book assumes a server, we assume a box |
 | NFR-4 | Durability | resume from a checkpoint after a mid-run fault without re-firing a write | P8 Checkpoint Loop (serialize every 3–5 steps; critical for 30+ min runs) + P26 |
 | NFR-5 | Observability | every run replayable; every alert threshold from Ch.11 wired to one dashboard | Ch.11's five pillars with traces as the "why"; one platform only |
-| NFR-6 | Portability | `CGO_ENABLED=0` single binary; loop code trafficks only through onegw and (v1) the 5-tool registry | App. C: one abstraction layer, then swap implementations only within 3% on the same suite |
+| NFR-6 | Portability | `CGO_ENABLED=0` single binary; loop code trafficks only through onegw and (v1) the 5-tool registry | *Numbers to know* (framework migration): one abstraction layer, then swap only within 3% on the same suite; App. C is the 12-dimension matrix behind that rule |
 | NFR-7 | Trace retention | 90 days; thresholds re-derived monthly (§11.5) | our choice, aligned with onegw's own 90-day default; the book sets no retention number |
 
 ## 6. API & data contract (v1 sketch)
 
-`design.md` §13 is the contract of record; the table below is that contract, kept here because the API is what consumers integrate against:
+`design.md` §15 (API & data) is the contract of record; the table below is that contract, kept here because the API is what consumers integrate against:
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -320,11 +322,11 @@ Traces (why) / metrics / logs / alerts / replays. **One** tracing platform (Lang
 
 ## 13. Roadmap, status & acceptance
 
-The build order is `design.md` §15, kept 1:1 so there is one record, not two. The book's 30-day/8-week plan is a *schedule overlay*, not a second backlog.
+The build order is `design.md` §17 (build order), kept 1:1 so there is one record, not two. The book's 30-day/8-week plan is a *schedule overlay*, not a second backlog.
 
-| # | Milestone | Scope | Acceptance (from design.md §15, sharpened) | Status |
+| # | Milestone | Scope | Acceptance (from design.md §17, sharpened) | Status |
 |---|---|---|---|---|
-| M0 | Docs SoT | this PRD + `design.md` reviewed; decisions closed | §15 decisions have owners and dates; PRD footer stamped | **in progress** |
+| M0 | Docs SoT | this PRD + `design.md` reviewed; decisions closed | the §15 open decisions have owners and dates; PRD footer stamped | **in progress** |
 | M1 | Containment core | LoopRunner + ToolRegistry + BudgetGuard + kill switch + runs API + `AgentBase` — i.e. the book's two **unconditional** patterns, P1 Bounded Loop and P75 Kill Switch, are the milestone's definition | §11.2 cases 1,2,3,4 pass in CI; **the kill switch is exercised quarterly** (book's instruction) and by every deploy smoke test | not started |
 | M2 | Guards + tracing | dedup/cycle/validation/2K cap, Tracer (nested spans), cycle alert, replay v1 | 3-layer repetition test passes; an injected fault is found by diffing traces; §11.2 case 5 | not started |
 | M3 | Planning | Planner/Replanner, parallel phases, tiered routing through onegw | a 5+-step task is ≥40% cheaper than single-tier ReAct at eval parity (±3%) | not started |
@@ -341,7 +343,7 @@ The playbook closes with twelve moves it claims carry the whole book. This PRD i
 |---|---|---|---|
 | 1 | **Name the termination** — exit before body: step, wall-clock, dollar, confidence floor, stall detector, consecutive failures | M1 `LoopRunner`: six exits, each a typed `ExitReason` on the run row and in the trace | build, M1 |
 | 2 | **Separate success from stopping** — "inbox is empty" is success, not termination | M1: `Success` (the goal predicate) and `ExitReason` (why we stopped) are separate fields; the containment test for case 1 asserts a *labelled partial*, not a silent stop | build, M1 |
-| 3 | **Route models by step type** — 40–70% | M3 through onegw combos (`planning`/`execution`/`tiny`); the acceptance is the ≥40% parity number in M3 | build, M3 |
+| 3 | **Route models by step type** — 40–70% | M3 through onegw combos (`planning`/`execution`/`tiny` — `execution` is ours to define); the acceptance is the ≥40% parity number in M3 | build, M3 |
 | 4 | **Treat tools as an API surface** — validated inputs, structured outputs, ≤5K tokens, do/don't descriptions, side-effect flags | M1/M2 `ToolRegistry`: P19 validation, P29 result cap (2,000 tokens), `write?` flag per tool, description template with a **"DO NOT USE WHEN"** clause + one example (the book's 30–40% tool-selection number) | build, M1–M2 |
 | 5 | **Compress state, never history** — summarise near the ceiling, keep decisions verbatim, evict raw turns | M4: 70% rule, landmarks verbatim, compression every 5 iterations | build, M4 |
 | 6 | **Idempotency on every write** (P26) | M1: fingerprint → check → persist-before-execute, plus the two-layer contract in §4.2 | build, M1 |
@@ -387,7 +389,7 @@ Three of the twelve are the ones that decide whether this is a plan or a wish. *
 
 | # | Decision | Recommendation | Owner | By |
 |---|---|---|---|---|
-| D0 | Who reviews and owns this PRD (no name in the file today) | the author signs §16 and turns D1–D7 into dated decisions | **you** | before any code |
+| D0 | Who reviews and owns this PRD (no name in the file today) | the author signs the Sources section and turns D1–D7 into dated decisions | **you** | before any code |
 | D1 | Runtime: Go vs Python | **Go** (§3.1) — the loop itself is stdlib-only, so the real question is the tools' SDKs; revisit if M2 slips | — | M0 exit |
 | D2 | Tracing backend: Langfuse self-hosted vs OTel-only | Langfuse self-hosted; OTel exporter as a secondary sink | — | before M2 |
 | D3 | Tenancy: single-tenant v1 vs isolation now | single-tenant v1, seam named (§7.4) | — | before M5 |
@@ -398,11 +400,12 @@ Three of the twelve are the ones that decide whether this is a plan or a wish. *
 
 ## 16. Sources
 
-- [`design.md`](../design.md) — the architecture of record: canonical loop contract (§4), tool-use engineering (§5), memory and state (§6), multi-agent gate (§7), HITL (§8), eval suite (§9), observability (§10), recovery (§11), cost (§12), API and data (§13), ship defaults (§14), build order (§15). This PRD summarizes it and points at it; where the two ever disagree, `design.md` wins on architecture and this file wins on scope/status.
+- [`design.md`](../design.md) — the architecture of record: canonical loop contract (§4), tool-use engineering (§5), memory and state (§6), multi-agent gate (§7), HITL (§8), eval suite (§9), observability (§10), recovery (§11), cost (§12), domain tracks (§13), API and data (§15), ship defaults (§16), build order (§17), open questions (§18). This PRD summarizes it and points at it; where the two ever disagree, `design.md` wins on architecture and this file wins on scope/status.
 - `loop-engineering-playbook-report.html` — full-book report (20 chapters, App. A–G): the numbers, thresholds, code shapes and pattern identifiers cited throughout, and the "where to discount" section that produced §18.
-- *The 0→1 Loop Engineering Playbook (2026 Edition)*, Valenx Press, first edition June 2026 — Ch.1–13 and App. A–G; the App. G CONFIG table is the basis of §17's per-template budgets, and App. C's "within 3% on the same eval suite" rule is why §1.2 refuses to write a framework.
-- Portfolio surfaces this PRD binds to, verified against their repositories: **onegw** (README tiering/combos, `[saver]`, `GET /v1/models`, `/admin/api/v1/usage/daily`; `docs/ARCHITECTURE.md` for the usage/cost rollups; `internal/idempotency`), **xdev** (`xdev rpc` JSONL-over-stdio, `internal/rpc`'s handler contract, `internal/serve` broker/gateway), **LeanKG** (`POST /api/v1/query`, the `query` MCP tool's action set, `/api/v1/memory/...` and its hindsight-compat aliases, the role model in `internal/auth`).
+- *The 0→1 Loop Engineering Playbook (2026 Edition)*, Valenx Press, first edition June 2026 — Ch.1–13 and App. A–G; the App. G CONFIG table is the basis of §17's per-template budgets, and the *Numbers to know* row for framework migration ("within 3% ship the custom version; more than 5% worse, debug before migrating") is why §1.2 refuses to write a framework, and App. C's 12-dimension matrix is the scoring behind that rule.
+- Portfolio surfaces this PRD binds to, verified against their repositories on 2026-09-18 by a read-only sweep that checked each claim file-by-file:  **onegw** (README tiering/combos, `[saver]`, `GET /v1/models`, `/admin/api/v1/usage/daily`; `docs/ARCHITECTURE.md` for the usage/cost rollups; `internal/idempotency`), **xdev** (`xdev rpc` JSONL-over-stdio, `internal/rpc`'s handler contract, `internal/serve` broker/gateway), **LeanKG** (`POST /api/v1/query`, the `query` MCP tool's action set, `/api/v1/memory/...` and its hindsight-compat aliases, the role model in `internal/auth`).
 - Deep read of both source documents for this PRD was done on 2026-09-18; all 40+ numeric figures reproduced here were taken from the report's *Numbers to know* table and the PDF's chapter bodies, not recalled.
+- **QC pass (2026-09-18):** a second, independent read-only sweep re-checked every claim in this PRD against the four repositories and `design.md` — endpoints, routes, config sections, tool names, role model, protocol constant and section pointers. 16 of 18 claim groups confirmed at file:line; the four that were wrong are fixed in the text and recorded in the footer. Claims that could not be confirmed were deleted rather than softened.
 ## 17. Appendix A — Defaults & calibration baseline
 
 One table, one rule: **nothing in the middle column is a spec.** Every value is a starting prior with its provenance in the third column, and the fourth column is the only legitimate way it changes.
@@ -411,15 +414,15 @@ The book's own framing is the licence for that posture — it prints these numbe
 
 | Knob | v1 value | Source | Calibration |
 |---|---|---|---|
-| `max_steps` | **9** per run | Ch.1 (*Numbers to know*: p95 completion count from staging + 30% headroom — a 6-step agent gets 9) | p95 staging completions × 1.3, monthly (§11.5) |
-| Wall-clock cap | **120 s** per run, excluding approval waits | derived from the platform's own p95 (there is no book prior for wall-clock; App. G has per-template step/cost budgets and a `query_timeout: 30` on the SQL template, nothing more) | p95 run time × 1.3 |
+| `max_steps` | **9** per run · `design.md` §4's code comment says "10–25 default" and its prose derives 9; this table is the resolution | Ch.1 (*Numbers to know*: p95 completion count from staging + 30% headroom — a 6-step agent gets 9) | p95 staging completions × 1.3, monthly (§11.5) |
+| Wall-clock cap | **120 s** per run, excluding approval waits · **tighter than `design.md` §4's "e.g. 5 min" example, deliberately** | derived from the platform's own p95 (there is no book prior for wall-clock; App. G has per-template step/cost budgets and a `query_timeout: 30` on the SQL template, nothing more) | p95 run time × 1.3 |
 | `cost_budget` | **$1.00** default; per template $0.03–0.08 (haiku-tier) / $0.20–0.50 (sonnet-tier) | App. G rows 1–8 | observed cost per completed task at eval parity |
 | Daily ceiling | 20× the per-run budget, per tenant-day | derived | measured runs/day × p95 cost, plus headroom |
 | Pre-synthesis reserve | **10%** of budget | Ch.4/13 (*numbers to know*: the budget split ends in a 10% buffer, and synthesis is forced once spend passes 90%) | the knee table (§12.2) |
 | Dedup | hash `tool+canonical(args)` before execution; break after 2 identical in a row | Ch.4/11 (*Numbers to know*: repetition guards, −18% wasted spend at 5,000+ runs/day) | prevented-waste rate, observed before loosening |
 | Cycle alert | **3** identical `(tool,args)` pairs | Ch.11 (*Numbers to know*: the same −18% figure) | our own cycle rate; a default, not a law |
 | Context ceiling | **70%** of the window for state+history | Ch.8 (*never fill more than 70% — 30% is the reasoning budget*; the book's shipped code compresses at 80%, i.e. its own text and code disagree by 10 points) | measured degradation curve per model |
-| Compression cadence | every **5** iterations; last 5 turns verbatim | Ch.8 (*Numbers to know*: compress every 5, keep the last 5 verbatim — a 40-step run keeps only 4–6 landmarks) | measured recall loss, not a schedule |
+| Compression cadence | every **5** iterations; last **5** turns verbatim (the tight end of `design.md` §6's 5–10 / 3–5) | Ch.8 (*Numbers to know*: compress every 5, keep the last 5 verbatim — a 40-step run keeps only 4–6 landmarks) | measured recall loss, not a schedule |
 | Tool result cap | **2,000** tokens (truncate at 4,000 chars, else summarize to 5 items) | Ch.6 (*Numbers to know*: result budget) | compressible-token ratio measured by onegw's savers |
 | Visible tool count | **5** in v1, hard cap **15** | Ch.6 (*keep 5–15; past 15 selection dilutes; a router cuts 30 → 3*) | an addition needs a removal or an eval justification (§14) |
 | Retry | 3 attempts, base 1.0 s ×2, cap 60 s, jitter ×[0.5,1.5] | Ch.12 (*Numbers to know* + `retry_with_backoff` code shape) — and the same row's rule: never blind-retry a 400 or a write | the observed transient-error distribution |
@@ -451,7 +454,9 @@ What survives the discount, and why the playbook was applied at all: the loop-le
 
 ---
 
-*Last updated: 2026-09-18 (v0.7.0 loop 6 — §21 (Appendix E): the four domain chapters mined for the *why* of each loop, and each mechanism tracked against what v1 already ships (coding: 4 of 5 in place; research: verification as a stage + labelled training-knowledge fallback; business process: exception path = §7.5; creative: the +30/+10/+3 curve = the ≤2-round cap and the ≥30-example rubric calibration rule).
+*Last updated: 2026-09-18 (v0.8.0 loop 7 — every external claim re-verified against onegw/xdev/LeanKG and `design.md`. Fixed: wrong `design.md` section pointers (§13→§15 API, §15→§17 build order, §16→§18 open questions, platform layer §6–12→§6–10), the fictional `execution` combo (onegw ships `tiny`/`planning`; `execution` is ours to define), the stale "onegw has no per-step routing" caveat (its task-aware reordering exists but ships off), design.md §18's different fifth tool (stated as a deliberate divergence instead of silently ignored), and three numeric drifts (`max_steps`, wall-clock, compression window). Added: the QC provenance of that sweep in §16.
+
+*v0.7.0 loop 6 — §21 (Appendix E): the four domain chapters mined for the *why* of each loop, and each mechanism tracked against what v1 already ships (coding: 4 of 5 in place; research: verification as a stage + labelled training-knowledge fallback; business process: exception path = §7.5; creative: the +30/+10/+3 curve = the ≤2-round cap and the ≥30-example rubric calibration rule).
 
 *v0.6.0 loop 5 — §20 (Appendix D) accounts for all 100 of the book's patterns: 54 adopted with the milestone that tests them, 29 deferred with a named adoption trigger, 17 rejected for now with a reason. No silent omissions.
 
