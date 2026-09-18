@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -73,9 +74,11 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) {
 	runner := loop.NewRunner(cfg, guard, s.tools)
 
 	// Run the loop in a goroutine so the API returns immediately.
+	// Use context.Background() (not r.Context()) so the background
+	// run isn't killed when the HTTP handler returns. The runner
+	// enforces its own WallClock timeout via RunnerConfig.
 	go func() {
-		ctx := r.Context()
-		result, err := runner.Run(ctx)
+		result, err := runner.Run(context.Background())
 		if err != nil {
 			result.State = loop.StateFailed
 		}

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/FreePeak/agentloop/internal/budget"
+	"github.com/FreePeak/agentloop/internal/replay"
+	"github.com/FreePeak/agentloop/internal/tracer"
 	"github.com/FreePeak/agentloop/internal/tools"
 )
 
@@ -62,22 +64,39 @@ type LoopRunner struct {
 	seenArgs     map[string]int // dedupKey -> count (cycle + idempotency)
 	spendSoFar   float64
 	nextToolFn   func(int, RunnerConfig) (string, map[string]any)
+	tracer       *tracer.Tracer // optional: nested span tracing (M2)
+	cycleAlert   func(string)   // optional: called on cycle detection (M2)
 }
 
 // NewRunner returns a LoopRunner for the given config.
 func NewRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry) *LoopRunner {
-	return newRunner(cfg, guard, reg, nextToolDefault)
+	return newRunner(cfg, guard, reg, nextToolDefault, nil, nil)
 }
 
 // NewRunnerWithToolFn returns a LoopRunner with a custom tool picker.
 // Used by tests to drive deterministic tool selection.
 func NewRunnerWithToolFn(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	toolPick func(int, RunnerConfig) (string, map[string]any)) *LoopRunner {
-	return newRunner(cfg, guard, reg, toolPick)
+	return newRunner(cfg, guard, reg, toolPick, nil, nil)
+}
+
+// NewRunnerWithTracer returns a LoopRunner with a custom tool picker
+// and tracer (M2: nested spans).
+func NewRunnerWithTracer(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
+	toolPick func(int, RunnerConfig) (string, map[string]any), t *tracer.Tracer) *LoopRunner {
+	return newRunner(cfg, guard, reg, toolPick, t, nil)
+}
+
+// NewRunnerWithCycleAlert returns a LoopRunner that calls alertFn
+// when a cycle is detected (M2: cycle alert).
+func NewRunnerWithCycleAlert(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
+	toolPick func(int, RunnerConfig) (string, map[string]any), alertFn func(string)) *LoopRunner {
+	return newRunner(cfg, guard, reg, toolPick, nil, alertFn)
 }
 
 func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
-	toolPick func(int, RunnerConfig) (string, map[string]any)) *LoopRunner {
+	toolPick func(int, RunnerConfig) (string, map[string]any),
+	t *tracer.Tracer, alertFn func(string)) *LoopRunner {
 	if cfg.MaxSteps == 0 {
 		cfg.MaxSteps = MaxSteps
 	}
@@ -87,6 +106,9 @@ func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	if cfg.CostBudget == 0 {
 		cfg.CostBudget = CostBudgetUSD
 	}
+	if t == nil {
+		t = tracer.New()
+	}
 	return &LoopRunner{
 		cfg:          cfg,
 		budgetGuard:  guard,
@@ -94,6 +116,8 @@ func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 		killCh:       make(chan struct{}),
 		seenArgs:     make(map[string]int),
 		nextToolFn:   toolPick,
+		tracer:       t,
+		cycleAlert:   alertFn,
 	}
 }
 
@@ -120,12 +144,18 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 		PartialSynthesis: "",
 	}
 
+	// --- M2: start root span for the run ---
+	r.tracer.StartSpan(r.cfg.RunID, r.cfg.RunID, "", tracer.SpanSystem, "run", 0)
+
 	for step := 0; step < r.cfg.MaxSteps; step++ {
 		// --- P75 kill switch: check at every iteration boundary ---
 		select {
 		case <-r.killCh:
 			result.State = StateKilled
 			result.PartialSynthesis = synthesizePartial(result.Steps)
+			r.tracer.StartSpan(r.cfg.RunID, r.cfg.RunID+"-kill", r.cfg.RunID, tracer.SpanSystem, "kill", step+1)
+			r.tracer.EndSpan(r.cfg.RunID+"-kill", nil, nil, 0)
+			r.endRunSpan(r.cfg.RunID, result, nil)
 			return result, nil
 		default:
 		}
@@ -136,6 +166,7 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 			result.ExitReason = ExitWallClock
 			result.Success = ptr(false)
 			result.PartialSynthesis = synthesizePartial(result.Steps)
+			r.endRunSpan(r.cfg.RunID, result, nil)
 			return result, nil
 		}
 
@@ -145,6 +176,9 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 			result.ExitReason = ExitCostBudget
 			result.Success = ptr(false)
 			result.PartialSynthesis = synthesizePartial(result.Steps)
+			r.tracer.StartSpan(r.cfg.RunID, r.cfg.RunID+"-budget", r.cfg.RunID, tracer.SpanSystem, "budget", step+1)
+			r.tracer.EndSpan(r.cfg.RunID+"-budget", nil, err, 0)
+			r.endRunSpan(r.cfg.RunID, result, err)
 			return result, nil
 		}
 
@@ -165,6 +199,12 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 			result.ExitReason = ExitProgressStall
 			result.Success = ptr(false)
 			result.PartialSynthesis = synthesizePartial(result.Steps)
+			if r.cycleAlert != nil {
+				r.cycleAlert(fmt.Sprintf("cycle: tool %q repeated %d times at step %d", toolName, r.seenArgs[argsHash], step))
+			}
+			r.tracer.StartSpan(r.cfg.RunID, r.cfg.RunID+"-cycle", r.cfg.RunID, tracer.SpanSystem, "cycle", step+1)
+			r.tracer.EndSpan(r.cfg.RunID+"-cycle", nil, fmt.Errorf("cycle detected"), 0)
+			r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("cycle detected"))
 			return result, nil
 		}
 
@@ -178,8 +218,14 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 				ArgsHash: argsHash,
 				Result:   "already executed — skipped",
 			})
+			r.tracer.StartSpan(r.cfg.RunID, fmt.Sprintf("span-%d", step), r.cfg.RunID, tracer.SpanAct, "idempotent-skip", step+1)
+			r.tracer.EndSpan(fmt.Sprintf("span-%d", step), "skipped", nil, 0)
 			continue
 		}
+
+		// --- M2: start child span for this tool call ---
+		spanID := fmt.Sprintf("span-%d", step)
+		r.tracer.StartSpan(r.cfg.RunID, spanID, r.cfg.RunID, tracer.SpanAct, toolName, step+1)
 
 		start := time.Now()
 		tr, err := r.toolRegistry.Execute(ctx, toolName, args)
@@ -187,6 +233,9 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 
 		r.spendSoFar += 0.001 // stub cost per call (real: CostTracker.estimate)
 		r.budgetGuard.RecordSpend(0.001)
+
+		// --- M2: validate result (2K token cap) ---
+		tr = validateResult(tr)
 
 		if err != nil || !tr.Success {
 			result.Steps = append(result.Steps, StepRecord{
@@ -198,6 +247,7 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 				CostUSD:   0.001,
 				LatencyMs: latency,
 			})
+			r.tracer.EndSpan(spanID, tr, err, 0.001)
 			continue
 		}
 
@@ -210,6 +260,7 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 			CostUSD:   0.001,
 			LatencyMs: latency,
 		})
+		r.tracer.EndSpan(spanID, tr, nil, 0.001)
 	}
 
 	// Loop exhausted without resolve = max_steps exit.
@@ -217,7 +268,62 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 	result.ExitReason = ExitMaxSteps
 	result.Success = ptr(false)
 	result.PartialSynthesis = synthesizePartial(result.Steps)
+	r.endRunSpan(r.cfg.RunID, result, nil)
 	return result, nil
+}
+
+// endRunSpan ends the root span and records the run-level outcome.
+func (r *LoopRunner) endRunSpan(runID string, result RunResult, runErr error) {
+	output := map[string]any{
+		"state":         result.State,
+		"exit_reason":   result.ExitReason,
+		"success":       result.Success,
+		"step_count":    len(result.Steps),
+		"spend_usd":     result.SpendUSD,
+	}
+	var err error
+	if runErr != nil {
+		err = runErr
+	}
+	r.tracer.EndSpan(runID, output, err, result.SpendUSD)
+}
+
+// validateResult enforces the M2 2K token cap on tool results.
+// Results exceeding the cap are truncated and flagged.
+func validateResult(tr tools.ToolResult) tools.ToolResult {
+	const maxTokens = 2000
+	size := estimateTokens(tr.Data)
+	if size > maxTokens {
+		tr.Data = map[string]any{
+			"truncated": true,
+			"original_size": size,
+			"capped_to":   maxTokens,
+			"preview":     partialString(tr.Data, maxTokens/2),
+		}
+		tr.Message = "result truncated to 2K tokens (M2 cap)"
+	}
+	return tr
+}
+
+// estimateTokens is a rough token estimate for a tool result.
+func estimateTokens(v any) int {
+	b, _ := json.Marshal(v)
+	return len(b) / 4 // ~4 chars per token
+}
+
+// partialString returns a truncated string representation
+// of v at maxChars.
+func partialString(v any, maxChars int) string {
+	s := fmt.Sprintf("%v", v)
+	if len(s) > maxChars {
+		return s[:maxChars] + "..."
+	}
+	return s
+}
+
+// Replay runs the replay analysis on the tracer's trace for this run.
+func (r *LoopRunner) Replay() replay.ReplayResult {
+	return replay.Replay(r.tracer, r.cfg.RunID)
 }
 
 // synthesizePartial builds a labelled partial synthesis from
