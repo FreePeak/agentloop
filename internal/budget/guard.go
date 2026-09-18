@@ -7,19 +7,23 @@ package budget
 
 import "fmt"
 
-// ErrBudgetExceeded is returned by Check when spend has reached the
-// pre-action threshold (costBudget * 0.9).
+// PreSynthReserve is the fraction of budget held back to fund a
+// forced synthesis when the ceiling fires. PRD §17: 10%.
+const PreSynthReserve = 0.10
+
+// ErrBudgetExceeded is returned by Check when spend has reached
+// the pre-action threshold (costBudget * (1 - PreSynthReserve)).
 var ErrBudgetExceeded = fmt.Errorf("budget exceeded: forced synthesis")
 
 // Guard tracks spend against the per-run and per-day ceilings and
 // owns the pre-synthesis reserve.
 type Guard struct {
-	CostBudget      float64 // per-run ceiling in USD
-	DailyCeiling    float64 // per-tenant-day ceiling in USD
-	SpendSoFar      float64 // cumulative spend this run
-	DailySpend      float64 // cumulative spend this tenant-day
-	SynthReserved   bool    // true once the synthesis reserve is taken
-	DailyExceeded   bool    // true once daily ceiling is breached
+	CostBudget    float64 // per-run ceiling in USD
+	DailyCeiling  float64 // per-tenant-day ceiling in USD
+	SpendSoFar    float64 // cumulative spend this run
+	DailySpend    float64 // cumulative spend this tenant-day
+	SynthReserved bool    // true once the synthesis reserve is taken
+	DailyExceeded bool    // true once daily ceiling is breached
 }
 
 // New returns a Guard for the given per-run budget and daily ceiling (USD).

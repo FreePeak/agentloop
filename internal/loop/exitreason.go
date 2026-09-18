@@ -2,20 +2,18 @@
 // the in-flight states a run passes through, and the constants that bound every loop.
 package loop
 
-import "fmt"
-
 // ExitReason names why a run stopped. Success and stopping are separate things:
 // a run can end with exitReason=max_steps and success=false (ceiling hit, goal
 // not met), or exitReason="" and success=true (goal met before any ceiling).
 type ExitReason string
 
 const (
-	ExitMaxSteps         ExitReason = "max_steps"
-	ExitWallClock        ExitReason = "wall_clock"
-	ExitCostBudget       ExitReason = "cost_budget"
-	ExitDailyBudget      ExitReason = "daily_budget"
-	ExitConfidenceFloor  ExitReason = "confidence_floor"
-	ExitProgressStall    ExitReason = "progress_stall"
+	ExitMaxSteps            ExitReason = "max_steps"
+	ExitWallClock           ExitReason = "wall_clock"
+	ExitCostBudget          ExitReason = "cost_budget"
+	ExitDailyBudget         ExitReason = "daily_budget"
+	ExitConfidenceFloor     ExitReason = "confidence_floor"
+	ExitProgressStall       ExitReason = "progress_stall"
 	ExitConsecutiveFailures ExitReason = "consecutive_failures"
 )
 
@@ -79,10 +77,9 @@ func (s State) IsTerminal() bool {
 
 // Run constants — every value is a calibrated prior from PRD §17, none a spec.
 const (
-	MaxSteps          = 9       // PRD §17: p95 staging completions × 1.3
-	WallClockS        = 120     // PRD §17: platform p95 × 1.3
-	CostBudgetUSD     = 1.00    // PRD §17: App. G default tier
-	DailyCeilingMult  = 20      // PRD §17: 20× per-run budget per tenant-day
-	PreSynthReserve   = 0.10    // PRD §17: 10% reserve for forced synthesis
-	CycleThreshold = 3 // PRD §17: 3 identical (tool,args) pairs = cycle
+	MaxSteps         = 9    // PRD §17: p95 staging completions × 1.3
+	WallClockS       = 120  // PRD §17: platform p95 × 1.3
+	CostBudgetUSD    = 1.00 // PRD §17: App. G default tier
+	DailyCeilingMult = 20   // PRD §17: 20× per-run budget per tenant-day
+	CycleThreshold   = 3    // PRD §17: 3 identical (tool,args) pairs = cycle
 )

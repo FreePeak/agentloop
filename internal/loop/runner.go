@@ -60,12 +60,24 @@ type LoopRunner struct {
 	toolRegistry tools.ToolRegistry
 	killCh       chan struct{}
 	seenArgs     map[string]int // dedupKey -> count (cycle + idempotency)
-	steps        []StepRecord
 	spendSoFar   float64
+	nextToolFn   func(int, RunnerConfig) (string, map[string]any)
 }
 
 // NewRunner returns a LoopRunner for the given config.
 func NewRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry) *LoopRunner {
+	return newRunner(cfg, guard, reg, nextToolDefault)
+}
+
+// NewRunnerWithToolFn returns a LoopRunner with a custom tool picker.
+// Used by tests to drive deterministic tool selection.
+func NewRunnerWithToolFn(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
+	toolPick func(int, RunnerConfig) (string, map[string]any)) *LoopRunner {
+	return newRunner(cfg, guard, reg, toolPick)
+}
+
+func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
+	toolPick func(int, RunnerConfig) (string, map[string]any)) *LoopRunner {
 	if cfg.MaxSteps == 0 {
 		cfg.MaxSteps = MaxSteps
 	}
@@ -81,6 +93,7 @@ func NewRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry) *L
 		toolRegistry: reg,
 		killCh:       make(chan struct{}),
 		seenArgs:     make(map[string]int),
+		nextToolFn:   toolPick,
 	}
 }
 
@@ -112,7 +125,7 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 		select {
 		case <-r.killCh:
 			result.State = StateKilled
-			result.PartialSynthesis = synthesizePartial(r.steps)
+			result.PartialSynthesis = synthesizePartial(result.Steps)
 			return result, nil
 		default:
 		}
@@ -122,7 +135,7 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 			result.State = StateExhausted
 			result.ExitReason = ExitWallClock
 			result.Success = ptr(false)
-			result.PartialSynthesis = synthesizePartial(r.steps)
+			result.PartialSynthesis = synthesizePartial(result.Steps)
 			return result, nil
 		}
 
@@ -131,13 +144,17 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 			result.State = StateExhausted
 			result.ExitReason = ExitCostBudget
 			result.Success = ptr(false)
-			result.PartialSynthesis = synthesizePartial(r.steps)
+			result.PartialSynthesis = synthesizePartial(result.Steps)
 			return result, nil
 		}
 
 		// --- one tool per ReAct turn ---
 		result.State = StateActing
-		toolName, args := nextToolDefault(step, r.cfg)
+		toolFn := r.nextToolFn
+		if toolFn == nil {
+			toolFn = nextToolDefault
+		}
+		toolName, args := toolFn(step, r.cfg)
 		argsHash := dedupKey(r.cfg.RunID, toolName, args)
 
 		// Track (tool, args) pairs for cycle detection (P5).
@@ -147,14 +164,14 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 			result.State = StateExhausted
 			result.ExitReason = ExitProgressStall
 			result.Success = ptr(false)
-			result.PartialSynthesis = synthesizePartial(r.steps)
+			result.PartialSynthesis = synthesizePartial(result.Steps)
 			return result, nil
 		}
 
 		// --- P26 idempotency: skip if already executed this exact call ---
 		// Count 2 = second occurrence (first was actual execution at count 1).
 		if r.seenArgs[argsHash] == 2 {
-			r.steps = append(r.steps, StepRecord{
+			result.Steps = append(result.Steps, StepRecord{
 				StepID:   step,
 				Phase:    "act",
 				Tool:     toolName,
@@ -172,7 +189,7 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 		r.budgetGuard.RecordSpend(0.001)
 
 		if err != nil || !tr.Success {
-			r.steps = append(r.steps, StepRecord{
+			result.Steps = append(result.Steps, StepRecord{
 				StepID:    step,
 				Phase:     "act",
 				Tool:      toolName,
@@ -184,7 +201,7 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 			continue
 		}
 
-		r.steps = append(r.steps, StepRecord{
+		result.Steps = append(result.Steps, StepRecord{
 			StepID:    step,
 			Phase:     "act",
 			Tool:      toolName,
@@ -199,7 +216,7 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 	result.State = StateExhausted
 	result.ExitReason = ExitMaxSteps
 	result.Success = ptr(false)
-	result.PartialSynthesis = synthesizePartial(r.steps)
+	result.PartialSynthesis = synthesizePartial(result.Steps)
 	return result, nil
 }
 

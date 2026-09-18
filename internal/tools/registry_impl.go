@@ -44,14 +44,14 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 	switch name {
 	case "repo_search":
 		return ToolResult{
-			Success: true,
-			Data:    map[string]any{"matches": []any{}, "rung": "L2", "reason": "keyword"},
+			Success:  true,
+			Data:     map[string]any{"matches": []any{}, "rung": "L2", "reason": "keyword"},
 			Metadata: map[string]string{"retrieval_rung": "L2", "freshness": "ok"},
 		}, nil
 	case "repo_context":
 		return ToolResult{
-			Success: true,
-			Data:    map[string]any{"context": "", "verb": "context"},
+			Success:  true,
+			Data:     map[string]any{"context": "", "verb": "context"},
 			Metadata: map[string]string{"extraction": "ast"},
 		}, nil
 	case "web_search":
@@ -68,8 +68,8 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 		}, nil
 	case "write_file":
 		return ToolResult{
-			Success: true,
-			Data:    map[string]any{"path": "", "written": true},
+			Success:  true,
+			Data:     map[string]any{"path": "", "written": true},
 			Metadata: map[string]string{"idempotency_key": "pending"},
 		}, nil
 	}

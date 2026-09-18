@@ -19,23 +19,23 @@ import (
 // Message is human/agent-readable; Metadata carries routing
 // signals (retrieval rung, freshness, etc.).
 type ToolResult struct {
-	Success  bool                 `json:"success"`
-	Data     map[string]any       `json:"data"`
-	Message  string               `json:"message,omitempty"`
-	Metadata map[string]string    `json:"metadata,omitempty"`
+	Success  bool              `json:"success"`
+	Data     map[string]any    `json:"data"`
+	Message  string            `json:"message,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // Tool describes one visible tool in the registry. DO NOT USE WHEN
 // is the highest-ROI prompt hour (PRD §4): it tells the model what
 // this tool must never be used for.
 type Tool struct {
-	Name          string             `json:"name"`
-	Description   string             `json:"description"`
-	UseWhen       string             `json:"use_when"`
-	DoNotUseWhen  string             `json:"do_not_use_when"`
-	Schema        json.RawMessage    `json:"schema"`
-	TimeoutMs     int                `json:"timeout_ms"`
-	Sandboxed     bool               `json:"sandboxed"`
+	Name         string          `json:"name"`
+	Description  string          `json:"description"`
+	UseWhen      string          `json:"use_when"`
+	DoNotUseWhen string          `json:"do_not_use_when"`
+	Schema       json.RawMessage `json:"schema"`
+	TimeoutMs    int             `json:"timeout_ms"`
+	Sandboxed    bool            `json:"sandboxed"`
 }
 
 // ToolRegistry is the interface agentloop calls into. Implementations
@@ -87,48 +87,48 @@ var _ = json.Marshal
 // (PRD §4). Each entry is a description with a USE WHEN and a DO NOT USE WHEN.
 var DefaultTools = []Tool{
 	{
-		Name:        "repo_search",
-		Description: "Search the codebase by keyword, element, or semantic query. Returns ranked matches with retrieval rung and freshness.",
-		UseWhen:     "When you need to find where something is defined, referenced, or discussed in the repo.",
+		Name:         "repo_search",
+		Description:  "Search the codebase by keyword, element, or semantic query. Returns ranked matches with retrieval rung and freshness.",
+		UseWhen:      "When you need to find where something is defined, referenced, or discussed in the repo.",
 		DoNotUseWhen: "When you already know the file and line — use repo_context instead.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
-		TimeoutMs:   30000,
-		Sandboxed:   false,
+		Schema:       json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
+		TimeoutMs:    30000,
+		Sandboxed:    false,
 	},
 	{
-		Name:        "repo_context",
-		Description: "Get AST-aware context around an element: callers, callees, impact, file context. Extracts context at the AST level, not file dumps.",
-		UseWhen:     "When you have a resolved element and need its neighbourhood — before writing code or reviewing.",
+		Name:         "repo_context",
+		Description:  "Get AST-aware context around an element: callers, callees, impact, file context. Extracts context at the AST level, not file dumps.",
+		UseWhen:      "When you have a resolved element and need its neighbourhood — before writing code or reviewing.",
 		DoNotUseWhen: "When you don't know which element to ask about — use repo_search first.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"element":{"type":"string"},"verb":{"type":"string","enum":["context","impact","callers","callees"]}},"required":["element","verb"]}`),
-		TimeoutMs:   30000,
-		Sandboxed:   false,
+		Schema:       json.RawMessage(`{"type":"object","properties":{"element":{"type":"string"},"verb":{"type":"string","enum":["context","impact","callers","callees"]}},"required":["element","verb"]}`),
+		TimeoutMs:    30000,
+		Sandboxed:    false,
 	},
 	{
-		Name:        "web_search",
-		Description: "Search the web via onegw provider kind=searxng. Results come back pre-formatted.",
-		UseWhen:     "When you need current information not in the repo — versions, docs, APIs.",
+		Name:         "web_search",
+		Description:  "Search the web via onegw provider kind=searxng. Results come back pre-formatted.",
+		UseWhen:      "When you need current information not in the repo — versions, docs, APIs.",
 		DoNotUseWhen: "For anything already in the repo — use repo_search instead.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
-		TimeoutMs:   30000,
-		Sandboxed:   false,
+		Schema:       json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
+		TimeoutMs:    30000,
+		Sandboxed:    false,
 	},
 	{
-		Name:        "run_tests",
-		Description: "Run tests in a restricted xdev sandbox workspace (--add-dir). One call per ReAct turn, never raw shell.",
-		UseWhen:     "When you need to verify code changes — the verification half of the write-test-fix loop.",
+		Name:         "run_tests",
+		Description:  "Run tests in a restricted xdev sandbox workspace (--add-dir). One call per ReAct turn, never raw shell.",
+		UseWhen:      "When you need to verify code changes — the verification half of the write-test-fix loop.",
 		DoNotUseWhen: "To explore the repo or search for anything — tests only.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"cwd":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}},"required":["cwd"]}`),
-		TimeoutMs:   120000,
-		Sandboxed:   true,
+		Schema:       json.RawMessage(`{"type":"object","properties":{"cwd":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}},"required":["cwd"]}`),
+		TimeoutMs:    120000,
+		Sandboxed:    true,
 	},
 	{
-		Name:        "write_file",
-		Description: "Write or modify a file in the restricted xdev sandbox workspace. Approval-gated for irreversible actions.",
-		UseWhen:     "When you need to create or edit a file as a result of a loop step.",
+		Name:         "write_file",
+		Description:  "Write or modify a file in the restricted xdev sandbox workspace. Approval-gated for irreversible actions.",
+		UseWhen:      "When you need to create or edit a file as a result of a loop step.",
 		DoNotUseWhen: "To read a file — use repo_context (read twin). Never to delete without approval.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`),
-		TimeoutMs:   30000,
-		Sandboxed:   true,
+		Schema:       json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`),
+		TimeoutMs:    30000,
+		Sandboxed:    true,
 	},
 }
