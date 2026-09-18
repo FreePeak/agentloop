@@ -4,7 +4,7 @@ The status/scope statement of work for **agentloop**: a Go service that runs
 bounded, budgeted, observable **agent loops** on behalf of other products —
 goal + budget in, answer / handoff / escalation out.
 
-**Status:** draft for review · **Version:** 1.1.1 · **Date:** 2026-09-18
+**Status:** draft for review · **Version:** 1.1.5 · **Date:** 2026-09-19
 
 **The whole PRD lives in [`docs/PRD.md`](docs/PRD.md) (23 numbered sections + 4 appendices).** This file exists because
 `docs/PRD.md` is a subdirectory of the worktree and a top-level landing page
