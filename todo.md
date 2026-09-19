@@ -49,6 +49,7 @@ Status: **COMPLETE**
 - `go vet ./...` → clean
 - `go test ./... -count=1` → all pass (35 test functions)
 
-### Next
-- Connect Planner output into Run() loop (phase-based fan-out)
-- Connect tier routing to onegw `/v1/chat/completions`
+### Completed
+- [x] Connect Planner output into Run() loop (phase-based fan-out) — PR #7
+- [x] Connect tier routing to onegw `/v1/chat/completions` — PR #7
+*Last updated: 2026-09-19 (PR #7: wired Planner output into Run(); M3 milestone closed)*
