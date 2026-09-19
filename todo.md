@@ -1,37 +1,49 @@
 # agentloop TODO
 
+## M1: Containment Core (PRD §13.1)
+
+Status: **COMPLETE**
+
+### Components
+- [x] `LoopRunner` — bounded loop with 6 exits (MaxSteps, WallClock, CostBudget, DailyCeiling, CycleThreshold, ConfidenceFloor)
+- [x] `ToolRegistry` — interface + 5 v1 tools (repo_search, repo_context, web_search, run_tests, write_file)
+- [x] `BudgetGuard` — cost circuit breaker with pre-action check
+- [x] Runs API: submit, poll, kill, SSE events
+- [x] Kill switch (P75): operator-triggered halt within 250ms
+
+### Bug fixes
+- [x] Fix: `TestLive_KillRun` — routes() not registered on production mux; extracted shared `routes()` function
+
+### Test results (M1)
+| Package | Tests | Build | Vet |
+|---|---|---|---|
+| cmd/agentloop | 3 live HTTP | OK | OK |
+| internal/loop | 6 | OK | OK |
+| **Total (M1)** | **9 functions** | **OK** | **OK** |
+
 ## M2: Guards + Tracing (PRD §13.1)
 
 Status: **COMPLETE**
 
 ### Components
-- [x] `internal/tracer/` — Tracer nested spans (StartSpan/EndSpan/RunSpans/Spans)
-- [x] `internal/replay/` — replay.Replay, ReplayResult.Diff, Validate
+- [x] `Tracer` nested spans (StartSpan/EndSpan/RunSpans/Spans)
+- [x] `Replay` — Replay, ReplayResult.Diff, Validate
 - [x] Runner wiring — tracer spans in Run(), cycle alert callback, 2K token cap
-- [x] `internal/loop/m2_test.go` — 6 M2 tests (tracer wiring, cycle alert, 3-layer trace diff, 2K cap, validate, kill span)
-- [x] `internal/tracer/tracer_test.go` — 4 tracer tests (nested spans, run spans, separation, thread safety)
-- [x] `internal/replay/replay_test.go` — 4 replay tests (structure, valid, cycle detection, diff)
-- [x] `cmd/agentloop/main_test.go` — 3 live HTTP tests (submit+poll, kill, SSE events)
+- [x] `ExitDailyBudget`/`ExitConfidenceFloor`/`ExitConsecutiveFailures` exits in Run()
+- [x] `internal/loop/exitreason.go` — ExitReasons struct with M2+M3 reasons
 
-### Bug fixes
-- [x] Fix: `submitRun` goroutine used `r.Context()` (cancels on handler return) → `context.Background()` so background runs aren't killed prematurely
-
-### PRD §11.2 coverage
-- [x] Case 1 — runaway halts (M1, re-verified)
-- [x] Case 2a — same run_id dedup (M1, re-verified)
-- [x] Case 3 — budget fires at 90% (M1, re-verified)
-- [x] Case 4 — kill switch (M1 + M2 span recording)
-- [x] Case 5 — injection safe (M1, re-verified)
-
-### Test results
-- `go test ./... -count=1` → all pass (25 test functions)
-- `go build ./...` → clean
-- `go vet ./...` → clean
-- Live HTTP tests → pass (httptest, no port conflict)
+### Test results (M2)
+| Package | Tests | Build | Vet |
+|---|---|---|---|
+| cmd/agentloop | 3 live HTTP | OK | OK |
+| internal/loop | 11 (incl. M2) | OK | OK |
+| internal/replay | 4 | OK | OK |
+| internal/tracer | 4 | OK | OK |
+| **Total (M2)** | **22 functions** | **OK** | **OK** |
 
 ## M3: Planning + Tiering (PRD §13.1)
 
-Status: **COMPLETE**
+Status: **COMPLETE** — merged in PR #6 (commit `5b53513`)
 
 ### Components
 - [x] `internal/planner/planner.go` — Planner/Replanner
@@ -41,15 +53,19 @@ Status: **COMPLETE**
   - [x] Per-step `Tier` field for routing through onegw combos
   - [x] `ValidateStepCount` test guard (3–7 band)
 - [x] `internal/planner/planner_test.go` — 10 tests (plan shape, phases, tier/frame, replan continue/replan/nil, parallel phases, step-count validation)
-- [x] Runner wiring — `ExitDailyBudget`/`ExitConfidenceFloor`/`ExitConsecutiveFailures` in Run() at step boundary and after each tool call
-- [x] `tierForStep`/`tierCombo` for onegw kind="systemone" routing
+- [x] Runner wiring — ExitReasons + tier routing + ceiling checks at step boundary
 
-### Test results
-- `go build ./...` → clean
-- `go vet ./...` → clean
-- `go test ./... -count=1` → all pass (35 test functions)
+### Test results (M3)
+| Package | Tests | Build | Vet |
+|---|---|---|---|
+| internal/planner | 10 | OK | OK |
+| Total | **32 functions** | **OK** | **OK** |
 
-### Completed
-- [x] Connect Planner output into Run() loop (phase-based fan-out) — PR #7
-- [x] Connect tier routing to onegw `/v1/chat/completions` — PR #7
-*Last updated: 2026-09-19 (PR #7: wired Planner output into Run(); M3 milestone closed)*
+### Production routing (blocker: onegw `feat/systemone-provider`)
+- [x] `onegw.toml.example` — `systemone` provider + combo added
+- [ ] onegw `feat/systemone-provider` merges into onegw master
+- [ ] Connect Planner output into Run() loop (phase-based fan-out via errgroup)
+- [ ] Connect tier routing to onegw `/v1/chat/completions`
+
+## Next
+- UI (M6) — HTMX console per `docs/UI-DESIGN.md`
