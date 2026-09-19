@@ -208,7 +208,6 @@ new provider tier — should cover it). No agentloop code change required.
 ---
 
 ## 7. Verification checklist (what "done" looks like)
-
 - [ ] `feat/systemone-provider` merged into onegw master
 - [ ] `go build ./...` and `go test ./internal/provider/...` in onegw master pass
   (the `systemone` `Kind` routes through the shared `provider.go` dispatch,
@@ -222,3 +221,19 @@ new provider tier — should cover it). No agentloop code change required.
   (confirms `KindSystemOne` catalog path, line 2156 in `provider.go`)
 - [ ] agentloop M1 containment case 3 (model from new provider tier) added and
   passing in `docs/check-prd.py`
+
+---
+
+## 8. Guardrail screening — the other half of Jev's job (agentloop scope)
+
+Jev is not only a model: its Noul (yes/no probability) and Score (harm severity) primitives are exactly the LLM guardrail recipe in the TypeSafe cookbook (https://docs.typesafe.ai/cookbooks/llm_guardrails). agentloop already sends user goals and model replies to the loop — those are the two surfaces the cookbook screens. Live experiments on 2026-09-19 (`typesafe_experiments.sh`, `internal/experiments/experiments.go`) ran the cookbook's full battery — 4 Noul hazard questions + 1 severity Score, one call per message, via `POST /v1/systemone` with `model = "jev-latest"` — against 10 user goals and 5 model replies under both strict and permissive policies:
+
+| What | Result |
+|---|---|
+| 5 harmful inputs (3 jailbreaks, 2 dangerous requests) | All `block` under strict; 1 routes to `review` under permissive (proof the thresholds are a product decision, not a default) |
+| 5 benign inputs | All `pass` under both policies |
+| 5 model replies (2 benign, 1 refusal, 2 harmful) | 2 `pass`, 3 `block` (dosage advice at sev 2.05, jailbreak-compliance at sev 1.44, harmful lockpick at sev 2.12) |
+| Per-call cost | ~740 ms, ~535 tokens in + 90 out (jev-1.13.0) |
+| Policy decision | strict is the default; permissive is operator-selectable; both published in PRD §17 as calibrated priors |
+
+Integration point: unchanged — agentloop still sends a `tier` per step and onegw still picks the leg. Guardrail screening rides the same `systemone` wire as a per-step call; the `POST /v1/systemone` above is the exact shape agentloop sends. Agentloop owns the threshold policy (PRD §4.3 separation of powers); TypeSafe owns the probabilities.
