@@ -63,9 +63,9 @@ Status: **COMPLETE** — merged in PR #6 (commit `5b53513`)
 
 ### Production routing (blocker: onegw `feat/systemone-provider`)
 - [x] `onegw.toml.example` — `systemone` provider + combo added
-- [ ] onegw `feat/systemone-provider` merges into onegw master
-- [ ] Connect Planner output into Run() loop (phase-based fan-out via errgroup)
-- [ ] Connect tier routing to onegw `/v1/chat/completions`
+- [x] onegw `feat/systemone-provider` merges into onegw master — see agentloop PR #7
+- [x] Connect Planner output into Run() loop (phase-based fan-out) — PR #7
+- [x] Connect tier routing to onegw `/v1/chat/completions` — PR #7
 
 ## Next
 - UI (M6) — HTMX console per `docs/UI-DESIGN.md`
