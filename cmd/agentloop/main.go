@@ -15,6 +15,7 @@ import (
 	"github.com/FreePeak/agentloop/internal/budget"
 	"github.com/FreePeak/agentloop/internal/loop"
 	"github.com/FreePeak/agentloop/internal/tools"
+	"github.com/FreePeak/agentloop/internal/planner"
 )
 
 // Server holds the in-memory run store and the tool registry.
@@ -71,7 +72,7 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) {
 		Goal:       body.Goal,
 		Context:    body.Context,
 	}
-	runner := loop.NewRunner(cfg, guard, s.tools)
+	runner := loop.NewRunnerWithPlanner(cfg, guard, s.tools, planner.NewPlanner())
 
 	// Run the loop in a goroutine so the API returns immediately.
 	// Use context.Background() (not r.Context()) so the background
