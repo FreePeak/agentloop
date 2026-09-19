@@ -59,6 +59,7 @@ type RunnerConfig struct {
 	Context             string
 	ConfidenceFloor     float64
 	EscalationThreshold float64
+	Gate                *ApprovalGate        // M5: fail-closed HITL gate (nil = bypass, tests)
 }
 
 // LoopRunner runs one bounded agent loop. Ceilings are enforced
@@ -86,31 +87,32 @@ type LoopRunner struct {
 	cycleAlert          func(string)   // optional: called on cycle detection (M2)
 	planner            *planner.Planner // optional: drives tool selection (M3)
 	plan                *planner.Plan  // current plan (M3)
+	gate                *ApprovalGate        // M5: fail-closed HITL gate (nil = bypass, tests)
 }
 // NewRunner returns a LoopRunner for the given config.
 func NewRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry) *LoopRunner {
-	return newRunner(cfg, guard, reg, nextToolDefault, nil, nil, nil, nil)
+	return newRunner(cfg, guard, reg, nextToolDefault, nil, nil, nil, nil, nil)
 }
 
 // NewRunnerWithToolFn returns a LoopRunner with a custom tool picker.
 // Used by tests to drive deterministic tool selection.
 func NewRunnerWithToolFn(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	toolPick func(int, RunnerConfig) (string, map[string]any)) *LoopRunner {
-	return newRunner(cfg, guard, reg, toolPick, nil, nil, nil, nil)
+	return newRunner(cfg, guard, reg, toolPick, nil, nil, nil, nil, nil)
 }
 
 // NewRunnerWithTracer returns a LoopRunner with a custom tool picker
 // and tracer (M2: nested spans).
 func NewRunnerWithTracer(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	toolPick func(int, RunnerConfig) (string, map[string]any), t *tracer.Tracer) *LoopRunner {
-	return newRunner(cfg, guard, reg, toolPick, t, nil, nil, nil)
+	return newRunner(cfg, guard, reg, toolPick, t, nil, nil, nil, nil)
 }
 
 // NewRunnerWithCycleAlert returns a LoopRunner that calls alertFn
 // when a cycle is detected (M2: cycle alert).
 func NewRunnerWithCycleAlert(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	toolPick func(int, RunnerConfig) (string, map[string]any), alertFn func(string)) *LoopRunner {
-	return newRunner(cfg, guard, reg, toolPick, nil, alertFn, nil, nil)
+	return newRunner(cfg, guard, reg, toolPick, nil, alertFn, nil, nil, nil)
 }
 
 // NewRunnerWithPlanner returns a LoopRunner that uses the Planner
@@ -118,7 +120,7 @@ func NewRunnerWithCycleAlert(cfg RunnerConfig, guard *budget.Guard, reg tools.To
 // planner.Plan() before the first step; nil falls back to nextToolDefault.
 func NewRunnerWithPlanner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	p *planner.Planner) *LoopRunner {
-	return newRunner(cfg, guard, reg, nextToolDefault, nil, nil, p, nil)
+	return newRunner(cfg, guard, reg, nextToolDefault, nil, nil, p, nil, nil)
 }
 
 // NewRunnerWithCheckpointer returns a LoopRunner that persists
@@ -128,13 +130,23 @@ func NewRunnerWithPlanner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolR
 func NewRunnerWithCheckpointer(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	toolPick func(int, RunnerConfig) (string, map[string]any),
 	cps *store.Store) *LoopRunner {
-	return newRunner(cfg, guard, reg, toolPick, nil, nil, nil, cps)
+	return newRunner(cfg, guard, reg, toolPick, nil, nil, nil, cps, nil)
 }
+// NewRunnerWithApprovalGate returns a LoopRunner that
+// enforces every tool call through the fail-closed HITL
+// gate (M5: P30/P68). Pass nil for the gate to bypass
+// HITL (default for all existing tests/constructors).
+func NewRunnerWithApprovalGate(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
+	toolPick func(int, RunnerConfig) (string, map[string]any),
+	gate *ApprovalGate) *LoopRunner {
+	return newRunner(cfg, guard, reg, toolPick, nil, nil, nil, nil, gate)
+}
+
 
 func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	toolPick func(int, RunnerConfig) (string, map[string]any),
 	t *tracer.Tracer, alertFn func(string), planner *planner.Planner,
-	cps *store.Store) *LoopRunner {
+	cps *store.Store, gate *ApprovalGate) *LoopRunner {
 	if cfg.MaxSteps == 0 {
 		cfg.MaxSteps = MaxSteps
 	}
@@ -154,16 +166,17 @@ func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 		t = tracer.New()
 	}
 	return &LoopRunner{
-		cfg:          cfg,
-		budgetGuard:  guard,
-		toolRegistry: reg,
-		killCh:       make(chan struct{}),
-		seenArgs:     make(map[string]int),
-		nextToolFn:   toolPick,
-		tracer:       t,
-		cycleAlert:   alertFn,
-		planner:      planner,
-		checkpointStore: cps,
+		cfg:               cfg,
+		budgetGuard:       guard,
+		toolRegistry:      reg,
+		killCh:            make(chan struct{}),
+		seenArgs:          make(map[string]int),
+		nextToolFn:        toolPick,
+		tracer:            t,
+		cycleAlert:        alertFn,
+		planner:           planner,
+		checkpointStore:   cps,
+		gate:              gate,
 	}
 }
 
@@ -289,6 +302,34 @@ if r.checkpointStore != nil {
 		}
 		toolName, args := toolFn(step, r.cfg)
 		argsHash := dedupKey(r.cfg.RunID, toolName, args)
+		// --- M5: fail-closed HITL gate (P30/P68) ---
+		// Categorize the tool; auto -> approve, confirm -> auto-if-confident,
+		// approve/unknown -> hold for the queue. Gate may be nil in tests.
+		if r.gate != nil {
+			conf := r.currentConfidence
+			if step == 0 {
+				conf = 1.0 // first step has no evidence yet - trust it
+			}
+			req := ApprovalRequest{
+				RunID:      r.cfg.RunID,
+				StepID:     step,
+				Tool:       toolName,
+				ArgsHash:   argsHash,
+				Category:   Categorize(toolName),
+				Confidence: conf,
+				Requested:  time.Now(),
+			}
+			dec := r.gate.Check(req)
+			if !dec.ShouldRun() {
+				result.State = StatePausedApproval
+				result.PartialSynthesis = synthesizePartial(result.Steps)
+				r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("approval required: %s", dec.Reason))
+				return result, nil
+			}
+		}
+
+
+
 
 		// Track (tool, args) pairs for cycle detection (P5).
 		// 3 identical pairs → progress_stall.
