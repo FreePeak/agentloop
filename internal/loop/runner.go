@@ -17,6 +17,7 @@ import (
 	"github.com/FreePeak/agentloop/internal/replay"
 	"github.com/FreePeak/agentloop/internal/tools"
 	"github.com/FreePeak/agentloop/internal/tracer"
+	"github.com/FreePeak/agentloop/internal/planner"
 )
 
 // StepRecord is one tool call within a run.
@@ -75,37 +76,47 @@ type LoopRunner struct {
 	nextToolFn          func(int, RunnerConfig) (string, map[string]any)
 	tracer              *tracer.Tracer // optional: nested span tracing (M2)
 	cycleAlert          func(string)   // optional: called on cycle detection (M2)
+	planner             *planner.Planner // optional: drives tool selection (M3)
+	plan                *planner.Plan  // current plan (M3)
 }
 
 // NewRunner returns a LoopRunner for the given config.
 func NewRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry) *LoopRunner {
-	return newRunner(cfg, guard, reg, nextToolDefault, nil, nil)
+	return newRunner(cfg, guard, reg, nextToolDefault, nil, nil, nil)
 }
 
 // NewRunnerWithToolFn returns a LoopRunner with a custom tool picker.
 // Used by tests to drive deterministic tool selection.
 func NewRunnerWithToolFn(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	toolPick func(int, RunnerConfig) (string, map[string]any)) *LoopRunner {
-	return newRunner(cfg, guard, reg, toolPick, nil, nil)
+	return newRunner(cfg, guard, reg, toolPick, nil, nil, nil)
 }
 
 // NewRunnerWithTracer returns a LoopRunner with a custom tool picker
 // and tracer (M2: nested spans).
 func NewRunnerWithTracer(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	toolPick func(int, RunnerConfig) (string, map[string]any), t *tracer.Tracer) *LoopRunner {
-	return newRunner(cfg, guard, reg, toolPick, t, nil)
+	return newRunner(cfg, guard, reg, toolPick, t, nil, nil)
 }
 
 // NewRunnerWithCycleAlert returns a LoopRunner that calls alertFn
 // when a cycle is detected (M2: cycle alert).
 func NewRunnerWithCycleAlert(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	toolPick func(int, RunnerConfig) (string, map[string]any), alertFn func(string)) *LoopRunner {
-	return newRunner(cfg, guard, reg, toolPick, nil, alertFn)
+	return newRunner(cfg, guard, reg, toolPick, nil, alertFn, nil)
+}
+
+// NewRunnerWithPlanner returns a LoopRunner that uses the Planner
+// to drive tool selection (M3). When planner is set, Run() calls
+// planner.Plan() before the first step; nil falls back to nextToolDefault.
+func NewRunnerWithPlanner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
+	p *planner.Planner) *LoopRunner {
+	return newRunner(cfg, guard, reg, nextToolDefault, nil, nil, p)
 }
 
 func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	toolPick func(int, RunnerConfig) (string, map[string]any),
-	t *tracer.Tracer, alertFn func(string)) *LoopRunner {
+	t *tracer.Tracer, alertFn func(string), planner *planner.Planner) *LoopRunner {
 	if cfg.MaxSteps == 0 {
 		cfg.MaxSteps = MaxSteps
 	}
@@ -133,6 +144,7 @@ func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 		nextToolFn:   toolPick,
 		tracer:       t,
 		cycleAlert:   alertFn,
+		planner:      planner,
 	}
 }
 
@@ -169,6 +181,16 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 		SpendUSD:         0,
 		CurrentTier:      r.tierForStep(0, r.cfg),
 		PartialSynthesis: "",
+	}
+
+	// --- M3: build the plan once before the first step ---
+	if r.planner != nil {
+		r.plan = r.planner.Plan(planner.PlannerConfig{
+			Goal:      r.cfg.Goal,
+			Context:   r.cfg.Context,
+			Tier:      "",  // routing tier: filled by onegw combo
+			Frame:     "",  // default: LOOP
+		})
 	}
 
 	// --- M2: start root span for the run ---
@@ -235,6 +257,10 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 		toolFn := r.nextToolFn
 		if toolFn == nil {
 			toolFn = nextToolDefault
+		}
+		// M3: use planner step tier for routing
+		if r.plan != nil && step < len(r.plan.Steps) {
+			result.CurrentTier = tierCombo(r.plan.Steps[step].Tier)
 		}
 		toolName, args := toolFn(step, r.cfg)
 		argsHash := dedupKey(r.cfg.RunID, toolName, args)

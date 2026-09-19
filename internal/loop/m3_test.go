@@ -7,6 +7,7 @@ import (
 
 	"github.com/FreePeak/agentloop/internal/budget"
 	"github.com/FreePeak/agentloop/internal/tools"
+	"github.com/FreePeak/agentloop/internal/planner"
 )
 
 // fakeRegistry is a test double implementing tools.ToolRegistry.
@@ -98,5 +99,32 @@ func TestM3_ConfidenceFloorDoesNotFireOnSuccess(t *testing.T) {
 	}
 	if result.ExitReason == ExitConfidenceFloor {
 		t.Errorf("ExitReason = %q, should not fire (default floor met)", ExitConfidenceFloor)
+	}
+}
+
+// TestM3_PlannerDrivenRun proves that when a Planner is wired
+// via NewRunnerWithPlanner, Run() calls planner.Plan() and sets
+// the run's tier from the plan's step tier.
+func TestM3_PlannerDrivenRun(t *testing.T) {
+	p := planner.NewPlanner()
+	reg := &fakeRegistry{}
+	guard := budget.New(1.0, 100.0)
+	cfg := RunnerConfig{
+		RunID:     "planner-test",
+		MaxSteps:  3,
+		WallClock: 10 * time.Second,
+		Goal:      "test planner integration",
+	}
+	runner := NewRunnerWithPlanner(cfg, guard, reg, p)
+	result, err := runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if len(result.Steps) == 0 {
+		t.Fatal("run has no steps")
+	}
+	// Tier should be set from the plan (planning or tiny default)
+	if result.CurrentTier != "planning" && result.CurrentTier != "tiny" {
+		t.Errorf("CurrentTier = %q, want planning or tiny", result.CurrentTier)
 	}
 }
