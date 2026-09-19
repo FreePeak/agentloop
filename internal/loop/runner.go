@@ -3,8 +3,8 @@
 // step, wall-clock, cost, confidence floor, progress stall,
 // consecutive failures. No ceiling is checked after the fact.
 package loop
-
 import (
+
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,10 +14,12 @@ import (
 	"time"
 
 	"github.com/FreePeak/agentloop/internal/budget"
+	"github.com/FreePeak/agentloop/internal/memory"
+	"github.com/FreePeak/agentloop/internal/planner"
 	"github.com/FreePeak/agentloop/internal/replay"
+	"github.com/FreePeak/agentloop/internal/store"
 	"github.com/FreePeak/agentloop/internal/tools"
 	"github.com/FreePeak/agentloop/internal/tracer"
-	"github.com/FreePeak/agentloop/internal/planner"
 )
 
 // StepRecord is one tool call within a run.
@@ -62,7 +64,13 @@ type RunnerConfig struct {
 // LoopRunner runs one bounded agent loop. Ceilings are enforced
 // in code, not by model behavior. The kill channel lets an
 // operator stop the loop mid-step (P75 Kill Switch).
+// M4 adds memory (four tiers) and SQLite checkpointing.
 type LoopRunner struct {
+	memory            *memory.Store     // four-tier state (M4)
+	checkpointStore   *store.Store      // SQLite WAL persistence (M4)
+	startStep         int               // resume point (checkpoint step_idx)
+	restoredSteps     []StepRecord      // steps carried over from checkpoint
+	resumed           bool              // set true when restored from checkpoint
 	cfg                 RunnerConfig
 	budgetGuard         *budget.Guard
 	toolRegistry        tools.ToolRegistry
@@ -76,34 +84,33 @@ type LoopRunner struct {
 	nextToolFn          func(int, RunnerConfig) (string, map[string]any)
 	tracer              *tracer.Tracer // optional: nested span tracing (M2)
 	cycleAlert          func(string)   // optional: called on cycle detection (M2)
-	planner             *planner.Planner // optional: drives tool selection (M3)
+	planner            *planner.Planner // optional: drives tool selection (M3)
 	plan                *planner.Plan  // current plan (M3)
 }
-
 // NewRunner returns a LoopRunner for the given config.
 func NewRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry) *LoopRunner {
-	return newRunner(cfg, guard, reg, nextToolDefault, nil, nil, nil)
+	return newRunner(cfg, guard, reg, nextToolDefault, nil, nil, nil, nil)
 }
 
 // NewRunnerWithToolFn returns a LoopRunner with a custom tool picker.
 // Used by tests to drive deterministic tool selection.
 func NewRunnerWithToolFn(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	toolPick func(int, RunnerConfig) (string, map[string]any)) *LoopRunner {
-	return newRunner(cfg, guard, reg, toolPick, nil, nil, nil)
+	return newRunner(cfg, guard, reg, toolPick, nil, nil, nil, nil)
 }
 
 // NewRunnerWithTracer returns a LoopRunner with a custom tool picker
 // and tracer (M2: nested spans).
 func NewRunnerWithTracer(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	toolPick func(int, RunnerConfig) (string, map[string]any), t *tracer.Tracer) *LoopRunner {
-	return newRunner(cfg, guard, reg, toolPick, t, nil, nil)
+	return newRunner(cfg, guard, reg, toolPick, t, nil, nil, nil)
 }
 
 // NewRunnerWithCycleAlert returns a LoopRunner that calls alertFn
 // when a cycle is detected (M2: cycle alert).
 func NewRunnerWithCycleAlert(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	toolPick func(int, RunnerConfig) (string, map[string]any), alertFn func(string)) *LoopRunner {
-	return newRunner(cfg, guard, reg, toolPick, nil, alertFn, nil)
+	return newRunner(cfg, guard, reg, toolPick, nil, alertFn, nil, nil)
 }
 
 // NewRunnerWithPlanner returns a LoopRunner that uses the Planner
@@ -111,12 +118,23 @@ func NewRunnerWithCycleAlert(cfg RunnerConfig, guard *budget.Guard, reg tools.To
 // planner.Plan() before the first step; nil falls back to nextToolDefault.
 func NewRunnerWithPlanner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	p *planner.Planner) *LoopRunner {
-	return newRunner(cfg, guard, reg, nextToolDefault, nil, nil, p)
+	return newRunner(cfg, guard, reg, nextToolDefault, nil, nil, p, nil)
+}
+
+// NewRunnerWithCheckpointer returns a LoopRunner that persists
+// every 5th iteration to the SQLite WAL checkpoint store (P8)
+// and resumes from the last checkpoint on a fault (NFR-4).
+// Pass nil for both to disable memory tracking (default).
+func NewRunnerWithCheckpointer(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
+	toolPick func(int, RunnerConfig) (string, map[string]any),
+	cps *store.Store) *LoopRunner {
+	return newRunner(cfg, guard, reg, toolPick, nil, nil, nil, cps)
 }
 
 func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	toolPick func(int, RunnerConfig) (string, map[string]any),
-	t *tracer.Tracer, alertFn func(string), planner *planner.Planner) *LoopRunner {
+	t *tracer.Tracer, alertFn func(string), planner *planner.Planner,
+	cps *store.Store) *LoopRunner {
 	if cfg.MaxSteps == 0 {
 		cfg.MaxSteps = MaxSteps
 	}
@@ -145,6 +163,7 @@ func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 		tracer:       t,
 		cycleAlert:   alertFn,
 		planner:      planner,
+		checkpointStore: cps,
 	}
 }
 
@@ -192,11 +211,18 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 			Frame:     "",  // default: LOOP
 		})
 	}
+// --- M4: resume from checkpoint if present ---
+if r.checkpointStore != nil {
+	r.prepareResume()
+	for _, sr := range r.restoredSteps {
+		result.Steps = append(result.Steps, sr)
+	}
+}
 
 	// --- M2: start root span for the run ---
 	r.tracer.StartSpan(r.cfg.RunID, r.cfg.RunID, "", tracer.SpanSystem, "run", 0)
 
-	for step := 0; step < r.cfg.MaxSteps; step++ {
+	for step := r.startStep; step < r.cfg.MaxSteps; step++ {
 		// --- P75 kill switch: check at every iteration boundary ---
 		select {
 		case <-r.killCh:
@@ -251,7 +277,6 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 			r.endRunSpan(r.cfg.RunID, result, err)
 			return result, nil
 		}
-
 		// --- one tool per ReAct turn ---
 		result.State = StateActing
 		toolFn := r.nextToolFn
@@ -322,9 +347,10 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 				LatencyMs: latency,
 			})
 			r.tracer.EndSpan(spanID, tr, err, 0.001)
+			r.rememberStep(step, toolName, tr.Message, true)
+			r.maybeCheckpoint(result.Steps)
 			continue
 		}
-
 		// --- M3: score + track consecutive failures ---
 		stepConf := 1.0
 		if err != nil || !tr.Success {
@@ -342,6 +368,8 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 			Confidence: stepConf,
 		})
 		r.tracer.EndSpan(spanID, tr, nil, 0.001)
+		r.rememberStep(step, toolName, tr.Data, false)
+		r.maybeCheckpoint(result.Steps)
 		if err != nil || !tr.Success {
 			r.consecutiveFailures++
 		} else {
