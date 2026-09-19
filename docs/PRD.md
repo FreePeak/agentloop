@@ -339,7 +339,10 @@ Scoring by type: exact, fuzzy, cosine, constraint-check, LLM-judge (stronger mod
 | 2 | Repeated identical write — **both retry shapes** | same `run_id`: the second identical `(tool,args)` never re-fires and returns the first outcome. New `run_id`, same intent: caught by the caller's idempotency key or the approval gate, never by luck |
 | 3 | Budget creep | at 90% spend the run forces synthesis; the "no progress = no spend" invariant ends a stalled loop |
 | 4 | Kill switch under load | kill lands inside one step boundary on a run with an in-flight tool call |
-| 5 | Injected prompt injection in retrieved content (test double registers the poisoned tool) | policy table and budget unchanged; the injection is surfaced, not obeyed |
+| 6 | Guardrail screening on input and output | the Noul/Score battery (§4.3, §7.2) blocks every harmful sample in the cookbook's 15-message experiment (5 input + 5 output + 5 threshold variants), and routes the benign samples to `pass`; live harness in `internal/experiments` and `typesafe_experiments.sh` |
+| 7 | TypeSafe `systemone` provider merged into onegw | `feat/systemone-provider` on onegw master; spec-verified config block in `onegw.toml.example`; health probe for the TypeSafe client |
+| 8 | Policy thresholds calibrated | strict vs permissive decision documented with a measured rationale; monthly re-derivation from our own traffic |
+| 6 | **Guardrail screening on input and output** | the Noul/Score battery (§4.3, §7.2) blocks every harmful sample in the cookbook's 15-message experiment (5 input + 5 output + 5 threshold variants), and routes the benign samples to `pass`; live harness in `internal/experiments` and `typesafe_experiments.sh` |
 
 These five are the **M1 gate**, not the suite — the distinction matters because calling them "the containment suite" invites the reading that containment is covered. The suite has three rungs, and each has a size, an owner and a category mix:
 
@@ -437,8 +440,9 @@ These are the ways the book's own priors (Ch.1–13), accepted wholesale, would 
 | **Semantic-cache false positives** — a cached answer served to a distinct question | confidently wrong answers at scale | threshold validated against *our* measured false-positive rate, per-template, never a copied default; cache only above the validated threshold |
 | **Infinite loop with cost** — the loop bounds themselves are the failure | worst case: spend breaks the service | pre-action enforcement, kill switch tested every deploy, per-day ceiling independent of per-run |
 | **Tool surface growth** — 5 tools becomes 40 | selection accuracy collapses, prompt cost grows | hard cap of 15 visible tools with a router beyond it; new tool requires a removal or an eval justification |
-| **Portfolio coupling** — onegw/LeanKG/xdev become hard dependencies | their outages stop our loops | every tool has a fallback rung and honest degrade copy; the loop itself has no hard dependency beyond the model gateway |
-| **Framework drift** — onegw's tiering/routing evolves | routing decisions silently change | routing is data (config) with a version; the eval gate catches behavior change |
+| **TypeSafe provider coupling** — onegw's `systemone` provider is still on an unmerged branch (`feat/systemone-provider`), and the TypeSafe API spec has not been fetched | if the provider surface changes (auth scheme, error codes, model catalog), the guardrail screen and the cost/usage accounting both break silently | gate M2 on a merged `systemone` branch + a spec-verified config block (see `docs/JEV-INTEGRATION.md` §3); treat `TypeSafeClient` as a swappable dependency with its own health probe |
+| **Guardrail latency** — a ~740 ms/call screen at every step boundary adds seconds to a 10-step run | real-time UX degrades; budget burns faster | screen once per phase boundary, not per tool call; count screen cost in BudgetGuard; allow operators to disable the output screen for non-critical runs (logged) |
+| **Threshold cargo-culting for guardrails** — copying the cookbook's strict policy verbatim | benign traffic (e.g. medical questions asked in good faith) is over-blocked | policy thresholds are calibrated from our own traffic mix (§11.3), re-derived monthly alongside §11.5; the strict/permissive split is a product decision named in §7.2 |
 
 ## 15. Open decisions (owner + deadline)
 
@@ -477,6 +481,8 @@ The book's own framing is the licence for that posture — it prints these numbe
 | Pre-synthesis reserve | **10%** of budget | Ch.4/13 (*numbers to know*: the budget split ends in a 10% buffer, and synthesis is forced once spend passes 90%) | the knee table (§12.2) |
 | Dedup | hash `tool+canonical(args)` before execution; break after 2 identical in a row | Ch.4/11 (*Numbers to know*: repetition guards, −18% wasted spend at 5,000+ runs/day) | prevented-waste rate, observed before loosening |
 | Cycle alert | **3** identical `(tool,args)` pairs | Ch.11 (*Numbers to know*: the same −18% figure) | our own cycle rate; a default, not a law |
+| **Guardrail policies** | **strict** (review ≥ 0.35, action ≥ 0.70, severity block ≥ 2.0) as the default, **permissive** (review ≥ 0.35, action ≥ 0.85, severity block ≥ 2.0) as the operator-selectable alternative | **measured**, not borrowed: two live experiments on 2026-09-19 (10 benign/edge/harmful inputs, 5 model outputs, 2 threshold-variance cases) established that the same jailbreak scores `block` at strict and `review` at permissive; the split is a product decision, published in §7.2 and re-derived monthly | our own traffic mix; cookbook policy values are a starting point, not a spec |
+| **Guardrail cost** | ~740 ms / ~665 tokens per screen call (jev-1.13.0, 4 Noul + 1 Score) | one TypeSafe call per screen; both inputs and outputs are screened | measured live on 2026-09-19 (§7.2, experiment 4) |
 | Context ceiling | **70%** of the window for state+history | Ch.8 (*never fill more than 70% — 30% is the reasoning budget*; the book's shipped code compresses at 80%, i.e. its own text and code disagree by 10 points) | measured degradation curve per model |
 | Compression cadence | every **5** iterations; last **5** turns verbatim (the tight end of `design.md` §6's 5–10 / 3–5) | Ch.8 (*Numbers to know*: compress every 5, keep the last 5 verbatim — a 40-step run keeps only 4–6 landmarks) | measured recall loss, not a schedule |
 | Tool result cap | **2,000** tokens (truncate at 4,000 chars, else summarize to 5 items) | Ch.6 (*Numbers to know*: result budget) | compressible-token ratio measured by onegw's savers |
@@ -702,5 +708,4 @@ Written the way an unfriendly reviewer would write it, then answered. Every find
 
 **Read next.** §13.1 (scope → milestones), §17 (defaults), §18 (where to discount the source), §22 (this document's own weaknesses).
 
-* M3 planning-tiering: wired ExitDailyBudget/ExitConfidenceFloor/ExitConsecutiveFailures into Run(); tierForStep/tierCombo for kind="systemone"; PR #7 wired Planner output into Run() loop (planner.Plan() at startup, tier routing per step).*
-  v0.1.1 review pass — self-reviewed against both source documents and the onegw/xdev/LeanKG surfaces; fixed dead cross-references and a superseded pointer; added the two idempotency layers and their record of truth (§4.2), the duplicate-write test and the Ch.12 recovery numbers (§8), Appendix A's calibration baseline table (§17), and Appendix B's extended discount of the source (§18); §…[+77b]
+* M3 planning-tiering: wired ExitDailyBudget/ExitConfidenceFloor/ExitConsecutiveFailures into Run(); tierForStep/tierCombo for kind="systemone"; PR #7 wired Planner output into Run() loop (planner.Plan() at startup, tier routing per step). All M3 todos complete.*
