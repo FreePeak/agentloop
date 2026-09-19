@@ -75,3 +75,16 @@ func (g *Guard) RunPct() float64 {
 	}
 	return g.SpendSoFar / g.CostBudget
 }
+
+// CheckDaily fires ExitDailyBudget: the per-tenant-day ceiling was
+// crossed by a prior RecordSpend. Pre-action check at the loop boundary.
+func (g *Guard) CheckDaily() error {
+	if g.DailyExceeded {
+		return ErrDailyExceeded
+	}
+	return nil
+}
+
+// ErrDailyExceeded is returned by CheckDaily when the per-tenant-day
+// ceiling was crossed.
+var ErrDailyExceeded = fmt.Errorf("daily budget exceeded: forced synthesis")

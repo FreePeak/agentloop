@@ -10,23 +10,25 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/FreePeak/agentloop/internal/budget"
 	"github.com/FreePeak/agentloop/internal/replay"
-	"github.com/FreePeak/agentloop/internal/tracer"
 	"github.com/FreePeak/agentloop/internal/tools"
+	"github.com/FreePeak/agentloop/internal/tracer"
 )
 
 // StepRecord is one tool call within a run.
 type StepRecord struct {
-	StepID    int         `json:"step_id"`
-	Phase     string      `json:"phase"` // think | act | evaluate
-	Tool      string      `json:"tool"`
-	ArgsHash  string      `json:"args_hash"`
-	Result    interface{} `json:"result,omitempty"`
-	CostUSD   float64     `json:"cost_usd"`
-	LatencyMs int64       `json:"latency_ms"`
+	StepID     int         `json:"step_id"`
+	Phase      string      `json:"phase"` // think | act | evaluate
+	Tool       string      `json:"tool"`
+	ArgsHash   string      `json:"args_hash"`
+	Result     interface{} `json:"result,omitempty"`
+	CostUSD    float64     `json:"cost_usd"`
+	Confidence float64     `json:"confidence"`
+	LatencyMs  int64       `json:"latency_ms"`
 }
 
 // RunResult is the outcome of a run. State says where it
@@ -40,32 +42,39 @@ type RunResult struct {
 	Success          *bool        `json:"success"` // nil until final evaluate
 	PartialSynthesis string       `json:"partial_synthesis,omitempty"`
 	SpendUSD         float64      `json:"spend_usd"`
+	CurrentTier      string       `json:"current_tier"`
 	Steps            []StepRecord `json:"steps"`
 }
 
 // RunnerConfig holds the tunables for a single run.
 type RunnerConfig struct {
-	RunID      string
-	MaxSteps   int
-	WallClock  time.Duration
-	CostBudget float64
-	Goal       string
-	Context    string
+	RunID               string
+	MaxSteps            int
+	WallClock           time.Duration
+	CostBudget          float64
+	Goal                string
+	Context             string
+	ConfidenceFloor     float64
+	EscalationThreshold float64
 }
 
 // LoopRunner runs one bounded agent loop. Ceilings are enforced
 // in code, not by model behavior. The kill channel lets an
 // operator stop the loop mid-step (P75 Kill Switch).
 type LoopRunner struct {
-	cfg          RunnerConfig
-	budgetGuard  *budget.Guard
-	toolRegistry tools.ToolRegistry
-	killCh       chan struct{}
-	seenArgs     map[string]int // dedupKey -> count (cycle + idempotency)
-	spendSoFar   float64
-	nextToolFn   func(int, RunnerConfig) (string, map[string]any)
-	tracer       *tracer.Tracer // optional: nested span tracing (M2)
-	cycleAlert   func(string)   // optional: called on cycle detection (M2)
+	cfg                 RunnerConfig
+	budgetGuard         *budget.Guard
+	toolRegistry        tools.ToolRegistry
+	killCh              chan struct{}
+	seenArgs            map[string]int // dedupKey -> count
+	consecutiveFailures int
+	currentTier         string
+	spendSoFar          float64
+	bestConfidence      float64
+	currentConfidence   float64
+	nextToolFn          func(int, RunnerConfig) (string, map[string]any)
+	tracer              *tracer.Tracer // optional: nested span tracing (M2)
+	cycleAlert          func(string)   // optional: called on cycle detection (M2)
 }
 
 // NewRunner returns a LoopRunner for the given config.
@@ -106,6 +115,12 @@ func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	if cfg.CostBudget == 0 {
 		cfg.CostBudget = CostBudgetUSD
 	}
+	if cfg.ConfidenceFloor == 0 {
+		cfg.ConfidenceFloor = ConfidenceFloorDefault
+	}
+	if cfg.EscalationThreshold == 0 {
+		cfg.EscalationThreshold = EscalationThreshold
+	}
 	if t == nil {
 		t = tracer.New()
 	}
@@ -123,6 +138,17 @@ func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 
 // Kill closes the kill channel — the loop checks it at every
 // iteration boundary and exits state=killed within one step.
+func (r *LoopRunner) tierForStep(_ int, _ RunnerConfig) string { return "planning" }
+
+func tierCombo(tier string) string {
+	switch tier {
+	case "planning":
+		return "planning"
+	default:
+		return "tiny"
+	}
+}
+
 func (r *LoopRunner) Kill() {
 	select {
 	case <-r.killCh:
@@ -141,6 +167,7 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 		State:            StateThinking,
 		Steps:            []StepRecord{},
 		SpendUSD:         0,
+		CurrentTier:      r.tierForStep(0, r.cfg),
 		PartialSynthesis: "",
 	}
 
@@ -167,6 +194,27 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 			result.Success = ptr(false)
 			result.PartialSynthesis = synthesizePartial(result.Steps)
 			r.endRunSpan(r.cfg.RunID, result, nil)
+			return result, nil
+		}
+
+		// --- M3: daily ceiling check (ExitDailyBudget) ---
+		if err := r.budgetGuard.CheckDaily(); err != nil {
+			result.State = StateExhausted
+			result.ExitReason = ExitDailyBudget
+			result.Success = ptr(false)
+			result.PartialSynthesis = synthesizePartial(result.Steps)
+			r.endRunSpan(r.cfg.RunID, result, err)
+			return result, nil
+		}
+
+		// --- M3: confidence floor check (ExitConfidenceFloor) ---
+		r.bestConfidence = math.Max(r.bestConfidence, r.currentConfidence)
+		if r.currentConfidence > 0 && r.bestConfidence < r.cfg.ConfidenceFloor {
+			result.State = StateExhausted
+			result.ExitReason = ExitConfidenceFloor
+			result.Success = ptr(false)
+			result.PartialSynthesis = synthesizePartial(result.Steps)
+			r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("confidence floor"))
 			return result, nil
 		}
 
@@ -251,16 +299,36 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 			continue
 		}
 
+		// --- M3: score + track consecutive failures ---
+		stepConf := 1.0
+		if err != nil || !tr.Success {
+			stepConf = 0.0
+		}
+		r.currentConfidence = stepConf
 		result.Steps = append(result.Steps, StepRecord{
-			StepID:    step,
-			Phase:     "act",
-			Tool:      toolName,
-			ArgsHash:  argsHash,
-			Result:    tr.Data,
-			CostUSD:   0.001,
-			LatencyMs: latency,
+			StepID:     step,
+			Phase:      "act",
+			Tool:       toolName,
+			ArgsHash:   argsHash,
+			Result:     tr.Data,
+			CostUSD:    0.001,
+			LatencyMs:  latency,
+			Confidence: stepConf,
 		})
 		r.tracer.EndSpan(spanID, tr, nil, 0.001)
+		if err != nil || !tr.Success {
+			r.consecutiveFailures++
+		} else {
+			r.consecutiveFailures = 0
+		}
+		if r.consecutiveFailures >= ConsecutiveFailures {
+			result.State = StateExhausted
+			result.ExitReason = ExitConsecutiveFailures
+			result.Success = ptr(false)
+			result.PartialSynthesis = synthesizePartial(result.Steps)
+			r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("consecutive failures"))
+			return result, nil
+		}
 	}
 
 	// Loop exhausted without resolve = max_steps exit.
@@ -275,11 +343,11 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 // endRunSpan ends the root span and records the run-level outcome.
 func (r *LoopRunner) endRunSpan(runID string, result RunResult, runErr error) {
 	output := map[string]any{
-		"state":         result.State,
-		"exit_reason":   result.ExitReason,
-		"success":       result.Success,
-		"step_count":    len(result.Steps),
-		"spend_usd":     result.SpendUSD,
+		"state":       result.State,
+		"exit_reason": result.ExitReason,
+		"success":     result.Success,
+		"step_count":  len(result.Steps),
+		"spend_usd":   result.SpendUSD,
 	}
 	var err error
 	if runErr != nil {
@@ -295,10 +363,10 @@ func validateResult(tr tools.ToolResult) tools.ToolResult {
 	size := estimateTokens(tr.Data)
 	if size > maxTokens {
 		tr.Data = map[string]any{
-			"truncated": true,
+			"truncated":     true,
 			"original_size": size,
-			"capped_to":   maxTokens,
-			"preview":     partialString(tr.Data, maxTokens/2),
+			"capped_to":     maxTokens,
+			"preview":       partialString(tr.Data, maxTokens/2),
 		}
 		tr.Message = "result truncated to 2K tokens (M2 cap)"
 	}

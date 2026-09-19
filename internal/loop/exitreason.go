@@ -77,9 +77,16 @@ func (s State) IsTerminal() bool {
 
 // Run constants — every value is a calibrated prior from PRD §17, none a spec.
 const (
-	MaxSteps         = 9    // PRD §17: p95 staging completions × 1.3
-	WallClockS       = 120  // PRD §17: platform p95 × 1.3
-	CostBudgetUSD    = 1.00 // PRD §17: App. G default tier
-	DailyCeilingMult = 20   // PRD §17: 20× per-run budget per tenant-day
-	CycleThreshold   = 3    // PRD §17: 3 identical (tool,args) pairs = cycle
+	MaxSteps            = 9    // PRD §17: p95 staging completions × 1.3
+	WallClockS          = 120  // PRD §17: platform p95 × 1.3
+	CostBudgetUSD       = 1.00 // PRD §17: App. G default tier
+	DailyCeilingMult    = 20   // PRD §17: 20× per-run budget per tenant-day
+	CycleThreshold      = 3    // PRD §17: 3 identical (tool,args) pairs = cycle
+	ConsecutiveFailures = 3    // PRD §17: 3 consecutive failures → escalate
+)
+
+// M3 defaults — calibrated priors, not specs.
+const (
+	ConfidenceFloorDefault = 0.7 // PRD §17: floor below which the loop escalates
+	EscalationThreshold    = 0.7 // PRD §17: run-level confidence floor
 )
