@@ -132,6 +132,21 @@ func (s *Server) killRun(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
 }
+// deleteRun handles DELETE /v1/runs/{id}. Removes the run record.
+// 404 if the run was never submitted (P40 / tenant cleanup).
+func (s *Server) deleteRun(w http.ResponseWriter, r *http.Request) {
+	runID := extractRunID(r.URL.Path)
+	s.mu.Lock()
+	_, ok := s.runs[runID]
+	if !ok {
+		s.mu.Unlock()
+		http.Error(w, `{"error":"run not found"}`, http.StatusNotFound)
+		return
+	}
+	delete(s.runs, runID)
+	s.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
 
 // events handles GET /v1/runs/{id}/events — simplified SSE for M1.
 // Returns all recorded state transitions as event-stream lines.
@@ -190,6 +205,6 @@ func main() {
 	mux.HandleFunc("POST /v1/runs", s.submitRun)
 	mux.HandleFunc("GET /v1/runs/{id}", s.getRun)
 	mux.HandleFunc("POST /v1/runs/{id}/kill", s.killRun)
-	mux.HandleFunc("GET /v1/runs/{id}/events", s.events)
+	mux.HandleFunc("DELETE /v1/runs/{id}", s.deleteRun)
 	http.ListenAndServe(":8080", mux)
 }

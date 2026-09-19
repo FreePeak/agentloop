@@ -27,7 +27,7 @@ func routes(s *Server) *http.ServeMux {
 	mux.HandleFunc("POST /v1/runs", s.submitRun)
 	mux.HandleFunc("GET /v1/runs/{id}", s.getRun)
 	mux.HandleFunc("POST /v1/runs/{id}/kill", s.killRun)
-	mux.HandleFunc("GET /v1/runs/{id}/events", s.events)
+	mux.HandleFunc("DELETE /v1/runs/{id}", s.deleteRun)
 	return mux
 }
 
@@ -115,6 +115,53 @@ func TestLive_KillRun(t *testing.T) {
 	json.NewDecoder(killResp.Body).Decode(&killed)
 	if killed["state"] != "killed" {
 		t.Errorf("state = %v, want killed", killed["state"])
+	}
+}
+// TestDeleteRun submits a run, deletes it, and confirms 404 after.
+func TestDeleteRun(t *testing.T) {
+	srv, _ := newTestServer(t)
+	defer srv.Close()
+
+	body := `{"goal":"delete me","context":"test"}`
+	postResp, err := http.Post(srv.URL+"/v1/runs", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	var submit map[string]any
+	json.NewDecoder(postResp.Body).Decode(&submit)
+	postResp.Body.Close()
+	runID, _ := submit["run_id"].(string)
+
+	// DELETE existing run → 204.
+	delReq, _ := http.NewRequest("DELETE", srv.URL+"/v1/runs/"+runID, nil)
+	delResp, derr := http.DefaultClient.Do(delReq)
+	if derr != nil {
+		t.Fatalf("DELETE: %v", derr)
+	}
+	defer delResp.Body.Close()
+	if delResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE status = %d, want %d", delResp.StatusCode, http.StatusNoContent)
+	}
+
+	// GET after delete → 404.
+	getResp, gerr := http.Get(srv.URL + "/v1/runs/" + runID)
+	if gerr != nil {
+		t.Fatalf("GET after delete: %v", gerr)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET after delete status = %d, want %d", getResp.StatusCode, http.StatusNotFound)
+	}
+
+	// DELETE again → 404 (idempotent cleanup).
+	delReq2, _ := http.NewRequest("DELETE", srv.URL+"/v1/runs/"+runID, nil)
+	delResp2, derr2 := http.DefaultClient.Do(delReq2)
+	if derr2 != nil {
+		t.Fatalf("second DELETE: %v", derr2)
+	}
+	defer delResp2.Body.Close()
+	if delResp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("second DELETE status = %d, want %d", delResp2.StatusCode, http.StatusNotFound)
 	}
 }
 
