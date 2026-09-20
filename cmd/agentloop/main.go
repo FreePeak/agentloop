@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -298,5 +299,11 @@ func main() {
 	mux.HandleFunc("GET /admin/console/runs", s.consoleRunsPage)
 	mux.HandleFunc("GET /admin/console/approvals", s.consoleApprovalsPage)
 	mux.HandleFunc("POST /admin/console/kill", s.consoleKillHandler)
-	http.ListenAndServe(":8080", mux)
+	port := os.Getenv("AGENTLOOP_PORT")
+	if port == "" {
+		port = "8080"
+	}
+	addr := ":" + port
+	fmt.Printf("agentloop listening on %s\n", addr)
+	http.ListenAndServe(addr, mux)
 }
