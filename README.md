@@ -12,9 +12,33 @@ makes the doc findable. Every substantive statement is in `docs/PRD.md`; the sec
 
 | What | Where |
 |---|---|
+| **How to build, run, and operate it** | [`docs/USAGE.md`](docs/USAGE.md) |
 | The PRD (23 sections, 4 appendices) | [`docs/PRD.md`](docs/PRD.md) |
 | The canonical architecture this PRD summarizes | [`../design.md`](../design.md) — at repo root |
 | The runnable check the ten review loops were run by | [`docs/check-prd.py`](docs/check-prd.py) |
+
+## Using it
+
+```bash
+make            # list targets
+make run        # build + serve on :8081 (onegw owns 8080)
+make check      # tests + lint — before a PR
+```
+
+Submit a run and watch it pause for approval:
+
+```bash
+curl -sS -X POST localhost:8081/v1/runs -H 'Content-Type: application/json' \
+  -d '{"goal":"smoke test","context":"hello"}'
+curl -sS localhost:8081/v1/runs/<run_id>       # => "paused_approval"
+```
+
+That pause is the gate working: the five built-in tool names are all
+approve-category (fail-closed), so a run holds on its first step. Note that
+approving today records the decision in the ledger but does not resume the run —
+there is no resume path yet, so the run stays `paused_approval`. Full
+walkthrough — API, states, exit reasons, tiers, approvals, and an honest list of
+what is still stubbed — in [`docs/USAGE.md`](docs/USAGE.md).
 
 ---
 
