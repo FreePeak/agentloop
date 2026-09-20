@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/FreePeak/agentloop/internal/budget"
+	"github.com/FreePeak/agentloop/internal/eval"
 	"github.com/FreePeak/agentloop/internal/loop"
 	"github.com/FreePeak/agentloop/internal/tools"
 	"github.com/FreePeak/agentloop/internal/planner"
@@ -148,6 +150,81 @@ func (s *Server) deleteRun(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// evalReportHandler handles GET /admin/api/v1/evals — returns a
+// placeholder eval report (M6). In production this reads from
+// the eval store; here it returns an empty report.
+func (s *Server) evalReportHandler(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(eval.Report{
+		SuiteID:    "default",
+		Total:      0,
+		Passed:     0,
+		PassRate:   0,
+		ByCategory: map[string]float64{},
+	})
+}
+
+// runsListHandler handles GET /admin/api/v1/runs — returns all runs.
+func (s *Server) runsListHandler(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	runs := make([]loop.RunResult, 0, len(s.runs))
+	for _, r := range s.runs {
+		runs = append(runs, r)
+	}
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"runs": runs})
+}
+
+// consoleRunsPage serves the console run-list page (M6).
+func (s *Server) consoleRunsPage(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	runCount := len(s.runs)
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "text/html")
+	fmt.Fprintf(w, "<html><body><h1>Runs</h1><p>Total: %d</p></body></html>", runCount)
+}
+
+// consoleApprovalsPage serves the approval queue page (M6).
+func (s *Server) consoleApprovalsPage(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	pending := 0
+	for _, r := range s.runs {
+		if r.State == loop.StatePausedApproval {
+			pending++
+		}
+	}
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "text/html")
+	fmt.Fprintf(w, "<html><body><h1>Approvals</h1><p>Pending: %d</p></body></html>", pending)
+}
+
+// consoleKillHandler handles POST /admin/console/kill — kill a run by ID
+// from the request body.
+func (s *Server) consoleKillHandler(w http.ResponseWriter, r *http.Request) {
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	runID, _ := body["run_id"].(string)
+	s.mu.Lock()
+	result, ok := s.runs[runID]
+	if !ok {
+		s.mu.Unlock()
+		http.Error(w, `{"error":"run not found"}`, http.StatusNotFound)
+		return
+	}
+	result.State = loop.StateKilled
+	result.Success = boolPtr(false)
+	s.runs[runID] = result
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
 // events handles GET /v1/runs/{id}/events — simplified SSE for M1.
 // Returns all recorded state transitions as event-stream lines.
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
@@ -197,14 +274,36 @@ func extractRunID(path string) string {
 	return rest
 }
 
+// extractAdminID strips the /admin/ prefix from an admin path.
+func extractAdminID(path string) string {
+	rest := strings.TrimPrefix(path, "/admin/console/kill/")
+	rest = strings.TrimPrefix(path, "/admin/console/kill")
+	return rest
+}
+
 func boolPtr(b bool) *bool { return &b }
 
 func main() {
 	s := NewServer()
 	mux := http.NewServeMux()
+	// API routes.
 	mux.HandleFunc("POST /v1/runs", s.submitRun)
 	mux.HandleFunc("GET /v1/runs/{id}", s.getRun)
 	mux.HandleFunc("POST /v1/runs/{id}/kill", s.killRun)
+	mux.HandleFunc("GET /v1/runs/{id}/events", s.events)
 	mux.HandleFunc("DELETE /v1/runs/{id}", s.deleteRun)
-	http.ListenAndServe(":8080", mux)
+	// Admin API (M6).
+	mux.HandleFunc("GET /admin/api/v1/runs", s.runsListHandler)
+	mux.HandleFunc("GET /admin/api/v1/evals", s.evalReportHandler)
+	// Console (M6).
+	mux.HandleFunc("GET /admin/console/runs", s.consoleRunsPage)
+	mux.HandleFunc("GET /admin/console/approvals", s.consoleApprovalsPage)
+	mux.HandleFunc("POST /admin/console/kill", s.consoleKillHandler)
+	port := os.Getenv("AGENTLOOP_PORT")
+	if port == "" {
+		port = "8080"
+	}
+	addr := ":" + port
+	fmt.Printf("agentloop listening on %s\n", addr)
+	http.ListenAndServe(addr, mux)
 }
