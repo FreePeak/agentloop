@@ -3,8 +3,8 @@
 // step, wall-clock, cost, confidence floor, progress stall,
 // consecutive failures. No ceiling is checked after the fact.
 package loop
-import (
 
+import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/FreePeak/agentloop/internal/budget"
+	"github.com/FreePeak/agentloop/internal/experiments"
 	"github.com/FreePeak/agentloop/internal/memory"
 	"github.com/FreePeak/agentloop/internal/planner"
 	"github.com/FreePeak/agentloop/internal/replay"
@@ -22,16 +23,25 @@ import (
 	"github.com/FreePeak/agentloop/internal/tracer"
 )
 
+// ScreenResult is one Noul/Score screening result from
+// the TypeSafe battery (M2.x).
+type ScreenResult struct {
+	Hazard string  `json:"hazard"`
+	Prob   float64 `json:"prob"`
+	Action string  `json:"action"` // pass | review | block
+}
+
 // StepRecord is one tool call within a run.
 type StepRecord struct {
-	StepID     int         `json:"step_id"`
-	Phase      string      `json:"phase"` // think | act | evaluate
-	Tool       string      `json:"tool"`
-	ArgsHash   string      `json:"args_hash"`
-	Result     interface{} `json:"result,omitempty"`
-	CostUSD    float64     `json:"cost_usd"`
-	Confidence float64     `json:"confidence"`
-	LatencyMs  int64       `json:"latency_ms"`
+	StepID     int            `json:"step_id"`
+	Phase      string         `json:"phase"` // think | act | evaluate
+	Tool       string         `json:"tool"`
+	ArgsHash   string         `json:"args_hash"`
+	Result     interface{}    `json:"result,omitempty"`
+	CostUSD    float64        `json:"cost_usd"`
+	Confidence float64        `json:"confidence"`
+	LatencyMs  int64          `json:"latency_ms"`
+	Screens    []ScreenResult `json:"screens,omitempty"` // M2.x: guardrail screen results
 }
 
 // RunResult is the outcome of a run. State says where it
@@ -59,7 +69,7 @@ type RunnerConfig struct {
 	Context             string
 	ConfidenceFloor     float64
 	EscalationThreshold float64
-	Gate                *ApprovalGate        // M5: fail-closed HITL gate (nil = bypass, tests)
+	Gate                *ApprovalGate // M5: fail-closed HITL gate (nil = bypass, tests)
 }
 
 // LoopRunner runs one bounded agent loop. Ceilings are enforced
@@ -67,11 +77,11 @@ type RunnerConfig struct {
 // operator stop the loop mid-step (P75 Kill Switch).
 // M4 adds memory (four tiers) and SQLite checkpointing.
 type LoopRunner struct {
-	memory            *memory.Store     // four-tier state (M4)
-	checkpointStore   *store.Store      // SQLite WAL persistence (M4)
-	startStep         int               // resume point (checkpoint step_idx)
-	restoredSteps     []StepRecord      // steps carried over from checkpoint
-	resumed           bool              // set true when restored from checkpoint
+	memory              *memory.Store // four-tier state (M4)
+	checkpointStore     *store.Store  // SQLite WAL persistence (M4)
+	startStep           int           // resume point (checkpoint step_idx)
+	restoredSteps       []StepRecord  // steps carried over from checkpoint
+	resumed             bool          // set true when restored from checkpoint
 	cfg                 RunnerConfig
 	budgetGuard         *budget.Guard
 	toolRegistry        tools.ToolRegistry
@@ -83,12 +93,15 @@ type LoopRunner struct {
 	bestConfidence      float64
 	currentConfidence   float64
 	nextToolFn          func(int, RunnerConfig) (string, map[string]any)
-	tracer              *tracer.Tracer // optional: nested span tracing (M2)
-	cycleAlert          func(string)   // optional: called on cycle detection (M2)
-	planner            *planner.Planner // optional: drives tool selection (M3)
-	plan                *planner.Plan  // current plan (M3)
-	gate                *ApprovalGate        // M5: fail-closed HITL gate (nil = bypass, tests)
+	tracer              *tracer.Tracer                                  // optional: nested span tracing (M2)
+	cycleAlert          func(string)                                    // optional: called on cycle detection (M2)
+	planner             *planner.Planner                                // optional: drives tool selection (M3)
+	plan                *planner.Plan                                   // current plan (M3)
+	gate                *ApprovalGate                                   // M5: fail-closed HITL gate (nil = bypass, tests)
+	guardrailScreen     func(string, any) (map[string]float64, float64) // M2.x: TypeSafe screen
+	pausedStep          int                                             // step held at paused_approval (M5)
 }
+
 // NewRunner returns a LoopRunner for the given config.
 func NewRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry) *LoopRunner {
 	return newRunner(cfg, guard, reg, nextToolDefault, nil, nil, nil, nil, nil)
@@ -123,6 +136,14 @@ func NewRunnerWithPlanner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolR
 	return newRunner(cfg, guard, reg, nextToolDefault, nil, nil, p, nil, nil)
 }
 
+// NewRunnerWithPlannerAndGate combines the M3 Planner and the M5
+// ApprovalGate in one runner (issue #12: gate-in-runner).
+// Pass nil for either to disable that feature.
+func NewRunnerWithPlannerAndGate(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
+	p *planner.Planner, gate *ApprovalGate) *LoopRunner {
+	return newRunner(cfg, guard, reg, nextToolDefault, nil, nil, p, nil, gate)
+}
+
 // NewRunnerWithCheckpointer returns a LoopRunner that persists
 // every 5th iteration to the SQLite WAL checkpoint store (P8)
 // and resumes from the last checkpoint on a fault (NFR-4).
@@ -132,6 +153,7 @@ func NewRunnerWithCheckpointer(cfg RunnerConfig, guard *budget.Guard, reg tools.
 	cps *store.Store) *LoopRunner {
 	return newRunner(cfg, guard, reg, toolPick, nil, nil, nil, cps, nil)
 }
+
 // NewRunnerWithApprovalGate returns a LoopRunner that
 // enforces every tool call through the fail-closed HITL
 // gate (M5: P30/P68). Pass nil for the gate to bypass
@@ -142,6 +164,16 @@ func NewRunnerWithApprovalGate(cfg RunnerConfig, guard *budget.Guard, reg tools.
 	return newRunner(cfg, guard, reg, toolPick, nil, nil, nil, nil, gate)
 }
 
+// NewRunnerWithTypeSafeScreen returns a LoopRunner with a
+// guardrail screening function (M2.x: TypeSafe). The function
+// produces Noul scores from a tool result; Route() decides
+// block/review/pass at each step boundary.
+func NewRunnerWithTypeSafeScreen(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
+	screen func(string, any) (map[string]float64, float64)) *LoopRunner {
+	r := newRunner(cfg, guard, reg, nextToolDefault, nil, nil, nil, nil, nil)
+	r.guardrailScreen = screen
+	return r
+}
 
 func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	toolPick func(int, RunnerConfig) (string, map[string]any),
@@ -166,28 +198,35 @@ func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 		t = tracer.New()
 	}
 	return &LoopRunner{
-		cfg:               cfg,
-		budgetGuard:       guard,
-		toolRegistry:      reg,
-		killCh:            make(chan struct{}),
-		seenArgs:          make(map[string]int),
-		nextToolFn:        toolPick,
-		tracer:            t,
-		cycleAlert:        alertFn,
-		planner:           planner,
-		checkpointStore:   cps,
-		gate:              gate,
+		cfg:             cfg,
+		budgetGuard:     guard,
+		toolRegistry:    reg,
+		killCh:          make(chan struct{}),
+		seenArgs:        make(map[string]int),
+		nextToolFn:      toolPick,
+		tracer:          t,
+		cycleAlert:      alertFn,
+		planner:         planner,
+		checkpointStore: cps,
+		gate:            gate,
 	}
 }
 
 // Kill closes the kill channel — the loop checks it at every
 // iteration boundary and exits state=killed within one step.
-func (r *LoopRunner) tierForStep(_ int, _ RunnerConfig) string { return "planning" }
+func (r *LoopRunner) tierForStep(step int, cfg RunnerConfig) string {
+	if r.plan != nil && step < len(r.plan.Steps) {
+		return r.plan.Steps[step].Tier
+	}
+	return "planning"
+}
 
 func tierCombo(tier string) string {
 	switch tier {
 	case "planning":
 		return "planning"
+	case "execution":
+		return "execution"
 	default:
 		return "tiny"
 	}
@@ -218,19 +257,19 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 	// --- M3: build the plan once before the first step ---
 	if r.planner != nil {
 		r.plan = r.planner.Plan(planner.PlannerConfig{
-			Goal:      r.cfg.Goal,
-			Context:   r.cfg.Context,
-			Tier:      "",  // routing tier: filled by onegw combo
-			Frame:     "",  // default: LOOP
+			Goal:    r.cfg.Goal,
+			Context: r.cfg.Context,
+			Tier:    "", // routing tier: filled by onegw combo
+			Frame:   "", // default: LOOP
 		})
 	}
-// --- M4: resume from checkpoint if present ---
-if r.checkpointStore != nil {
-	r.prepareResume()
-	for _, sr := range r.restoredSteps {
-		result.Steps = append(result.Steps, sr)
+	// --- M4: resume from checkpoint if present ---
+	if r.checkpointStore != nil {
+		r.prepareResume()
+		for _, sr := range r.restoredSteps {
+			result.Steps = append(result.Steps, sr)
+		}
 	}
-}
 
 	// --- M2: start root span for the run ---
 	r.tracer.StartSpan(r.cfg.RunID, r.cfg.RunID, "", tracer.SpanSystem, "run", 0)
@@ -328,9 +367,6 @@ if r.checkpointStore != nil {
 			}
 		}
 
-
-
-
 		// Track (tool, args) pairs for cycle detection (P5).
 		// 3 identical pairs → progress_stall.
 		r.seenArgs[argsHash]++
@@ -377,6 +413,34 @@ if r.checkpointStore != nil {
 		// --- M2: validate result (2K token cap) ---
 		tr = validateResult(tr)
 
+		// --- M2.x: TypeSafe guardrail screen ---
+		if r.guardrailScreen != nil {
+			nouls, sev := r.guardrailScreen(toolName, tr.Data)
+			action := experiments.Route(nouls, sev, experiments.Strict)
+			if action == "review" {
+				result.State = StatePausedApproval
+				result.PartialSynthesis = synthesizePartial(result.Steps)
+				r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("guardrail: review required"))
+				return result, nil
+			}
+			if action == "block" {
+				result.State = StateExhausted
+				result.ExitReason = ExitGuardrailBlock
+				result.Success = ptr(false)
+				result.PartialSynthesis = synthesizePartial(result.Steps)
+				r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("guardrail: blocked"))
+				return result, nil
+			}
+			// Record non-block screen result on the step (ponytail: ceiling — only pass/review/block recorded; upgrade path: store full Noul battery payload).
+			if len(result.Steps) > 0 {
+				result.Steps[len(result.Steps)-1].Screens = append(result.Steps[len(result.Steps)-1].Screens, ScreenResult{
+					Hazard: "noul_battery",
+					Prob:   sev,
+					Action: action,
+				})
+			}
+		}
+
 		if err != nil || !tr.Success {
 			result.Steps = append(result.Steps, StepRecord{
 				StepID:    step,
@@ -411,6 +475,7 @@ if r.checkpointStore != nil {
 		r.tracer.EndSpan(spanID, tr, nil, 0.001)
 		r.rememberStep(step, toolName, tr.Data, false)
 		r.maybeCheckpoint(result.Steps)
+
 		if err != nil || !tr.Success {
 			r.consecutiveFailures++
 		} else {

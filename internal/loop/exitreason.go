@@ -15,6 +15,7 @@ const (
 	ExitConfidenceFloor     ExitReason = "confidence_floor"
 	ExitProgressStall       ExitReason = "progress_stall"
 	ExitConsecutiveFailures ExitReason = "consecutive_failures"
+	ExitGuardrailBlock      ExitReason = "guardrail_block" // M2.x: TypeSafe screen blocked
 )
 
 // AllExitReasons lists every ExitReason in declaration order. Used by tests to
@@ -23,6 +24,7 @@ func AllExitReasons() []ExitReason {
 	return []ExitReason{
 		ExitMaxSteps, ExitWallClock, ExitCostBudget, ExitDailyBudget,
 		ExitConfidenceFloor, ExitProgressStall, ExitConsecutiveFailures,
+		ExitGuardrailBlock,
 	}
 }
 
