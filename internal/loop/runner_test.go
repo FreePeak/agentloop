@@ -191,13 +191,14 @@ func TestCase5_InjectionSafe(t *testing.T) {
 // is reachable and listed — no silent exit paths.
 func TestAllExitReasonsListed(t *testing.T) {
 	got := loop.AllExitReasons()
-	if len(got) != 7 {
-		t.Fatalf("AllExitReasons() returned %d items, want 7", len(got))
+	if len(got) != 8 {
+		t.Fatalf("AllExitReasons() returned %d items, want 8", len(got))
 	}
 	expected := map[string]bool{
 		"max_steps": false, "wall_clock": false, "cost_budget": false,
 		"daily_budget": false, "confidence_floor": false,
 		"progress_stall": false, "consecutive_failures": false,
+		"guardrail_block": false,
 	}
 	for _, r := range got {
 		if _, ok := expected[r.String()]; !ok {
@@ -209,5 +210,60 @@ func TestAllExitReasonsListed(t *testing.T) {
 		if !v {
 			t.Errorf("missing exit reason %q in AllExitReasons()", k)
 		}
+	}
+}
+
+// TestCase6_TypeSafeBlock verifies M2.x: when a guardrail screen
+// returns a "block" action for a hazard, Run() exits with
+// ExitGuardrailBlock and labelled partial (no silent pass).
+func TestCase6_TypeSafeBlock(t *testing.T) {
+	guard := budget.New(100.0, 200.0)
+	reg := tools.NewRegistry()
+	cfg := loop.RunnerConfig{
+		RunID:     "test-typesafe",
+		MaxSteps:  3,
+		WallClock: 10 * time.Second,
+		Goal:      "test",
+	}
+	screen := func(tool string, data any) (map[string]float64, float64) {
+		return map[string]float64{"jailbreak": 0.9}, 3.0
+	}
+	runner := loop.NewRunnerWithTypeSafeScreen(cfg, guard, reg, screen)
+	result, err := runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if result.ExitReason != loop.ExitGuardrailBlock {
+		t.Errorf("ExitReason = %q, want %q", result.ExitReason, loop.ExitGuardrailBlock)
+	}
+	if result.Success != nil && *result.Success {
+		t.Error("Success = true, want false (guardrail block)")
+	}
+	if result.PartialSynthesis == "" {
+		t.Error("PartialSynthesis empty on guardrail block")
+	}
+}
+
+// TestCase7_TypeSafePass verifies M2.x: when the guardrail screen
+// returns a non-block action, Run() continues normally.
+func TestCase7_TypeSafePass(t *testing.T) {
+	guard := budget.New(100.0, 200.0)
+	reg := tools.NewRegistry()
+	cfg := loop.RunnerConfig{
+		RunID:     "test-typesafe-pass",
+		MaxSteps:  3,
+		WallClock: 10 * time.Second,
+		Goal:      "test",
+	}
+	screen := func(tool string, data any) (map[string]float64, float64) {
+		return map[string]float64{"jailbreak": 0.1}, 1.0
+	}
+	runner := loop.NewRunnerWithTypeSafeScreen(cfg, guard, reg, screen)
+	result, err := runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if result.ExitReason == loop.ExitGuardrailBlock {
+		t.Error("ExitReason = guardrail_block, want normal exit")
 	}
 }

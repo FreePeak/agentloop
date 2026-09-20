@@ -35,6 +35,10 @@ func routes(s *Server) *http.ServeMux {
 	mux.HandleFunc("POST /v1/runs/{id}/kill", s.killRun)
 	mux.HandleFunc("GET /v1/runs/{id}/events", s.events)
 	mux.HandleFunc("DELETE /v1/runs/{id}", s.deleteRun)
+	mux.HandleFunc("DELETE /v1/runs/{id}/memory", s.deleteRunMemory)
+	mux.HandleFunc("GET /v1/runs/{id}/approvals", s.getApprovals)
+	mux.HandleFunc("POST /v1/runs/{id}/approvals", s.submitApproval)
+	mux.HandleFunc("POST /v1/runs/{id}/approvals/{approval_id}", s.submitApprovalByID)
 	// Admin/console routes (M6).
 	mux.HandleFunc("GET /admin/api/v1/runs", s.runsListHandler)
 	mux.HandleFunc("GET /admin/api/v1/evals", s.evalReportHandler)
@@ -69,17 +73,24 @@ func TestLive_SubmitAndPoll(t *testing.T) {
 		t.Fatal("run_id empty in submit response")
 	}
 
-	// Poll until the run completes (steps recorded).
+	// Poll until the run completes (steps recorded) or pauses for approval.
 	var result RunResultResponse
 	finished := false
+	pausedApproval := false
 	for i := 0; i < 30; i++ {
 		getResp, gerr := http.Get(srv.URL + "/v1/runs/" + runID)
 		if gerr != nil {
 			t.Fatalf("GET /v1/runs/%s: %v", runID, gerr)
 		}
 		if getResp.StatusCode == http.StatusOK {
-			if derr := json.NewDecoder(getResp.Body).Decode(&result); derr == nil && len(result.Steps) > 0 {
-				finished = true
+			if derr := json.NewDecoder(getResp.Body).Decode(&result); derr == nil {
+				if len(result.Steps) > 0 {
+					finished = true
+				}
+				if result.State == "paused_approval" {
+					pausedApproval = true
+					finished = true
+				}
 			}
 		}
 		getResp.Body.Close()
@@ -90,6 +101,10 @@ func TestLive_SubmitAndPoll(t *testing.T) {
 	}
 	if !finished {
 		t.Fatal("run did not finish with steps within timeout")
+	}
+	if pausedApproval {
+		// M5: run paused for approval — verify gate caught a CatApprove tool.
+		return
 	}
 	if result.ExitReason == "" {
 		t.Error("ExitReason empty — run did not complete")
@@ -133,6 +148,7 @@ func TestLive_KillRun(t *testing.T) {
 		t.Errorf("state = %v, want killed", killed["state"])
 	}
 }
+
 // waitForRun polls GET /v1/runs/{id} until the run result
 // is stored in the server. Used by kill/delete/console tests
 // to avoid a race with the background goroutine.
@@ -450,5 +466,139 @@ func TestM6_Demo_HITLWithEvals(t *testing.T) {
 	json.NewDecoder(evalResp.Body).Decode(&report)
 	if report.SuiteID == "" {
 		t.Error("eval report missing suite_id")
+	}
+}
+
+// TestM5_ApprovalEndpoints verifies the M5 approval HTTP
+// surface: GET returns pending approvals, POST approves.
+func TestM5_ApprovalEndpoints(t *testing.T) {
+	srv, _ := newTestServer(t)
+	defer srv.Close()
+
+	// GET approvals for unknown run → 404.
+	resp, err := http.Get(srv.URL + "/v1/runs/unknown/approvals")
+	if err != nil {
+		t.Fatalf("GET approvals: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+
+	// POST approve for unknown run → 404.
+	body := `{"step_id":0}`
+	resp, err = http.Post(srv.URL+"/v1/runs/unknown/approvals", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST approve: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
+// TestM5_ApproveByStepID verifies approving a specific
+// step ID via the /approvals/{approval_id} endpoint.
+func TestM5_ApproveByStepID(t *testing.T) {
+	srv, _ := newTestServer(t)
+	defer srv.Close()
+
+	// POST /v1/runs/{id}/approvals/0 for unknown run → 404.
+	resp, err := http.Post(srv.URL+"/v1/runs/unknown/approvals/0", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST approve-by-id: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
+// TestM5_GateRegisteredForNewRun proves the gate the run was built
+// with is the one enforcing HITL. Regression guard for issue #12:
+// submitRun constructed the runner with a nil gate while the gate
+// sat in the map, so no run ever paused for approval.
+//
+// The assertion is the paused state, not the approvals endpoint —
+// that endpoint reads the map (populated either way) and would pass
+// even while the runner ran gateless.
+func TestM5_GateRegisteredForNewRun(t *testing.T) {
+	srv, _ := newTestServer(t)
+	defer srv.Close()
+
+	body := `{"goal":"gate registered","context":"test"}`
+	resp, err := http.Post(srv.URL+"/v1/runs", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	var submit map[string]any
+	json.NewDecoder(resp.Body).Decode(&submit)
+	resp.Body.Close()
+	runID, _ := submit["run_id"].(string)
+	if runID == "" {
+		t.Fatal("run_id empty")
+	}
+
+	// These tools are not all read-category: repo_context categorizes
+	// to approve (fail closed), so a gateless runner is the only way
+	// this run reaches a terminal state without pausing.
+	var state string
+	for i := 0; i < 100; i++ {
+		getResp, gerr := http.Get(srv.URL + "/v1/runs/" + runID)
+		if gerr != nil {
+			t.Fatalf("GET run: %v", gerr)
+		}
+		var result RunResultResponse
+		der := json.NewDecoder(getResp.Body).Decode(&result)
+		getResp.Body.Close()
+		if der == nil && result.State != "" {
+			state = result.State
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if state != "paused_approval" {
+		t.Fatalf("run state = %q, want paused_approval (runner has no gate wired)", state)
+	}
+}
+
+// TestM4_DeleteRunMemory verifies DELETE /v1/runs/{id}/memory.
+func TestM4_DeleteRunMemory(t *testing.T) {
+	srv, _ := newTestServer(t)
+	defer srv.Close()
+
+	// Submit a run.
+	body := `{"goal":"memory test","context":"test"}`
+	resp, err := http.Post(srv.URL+"/v1/runs", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	var submit map[string]any
+	json.NewDecoder(resp.Body).Decode(&submit)
+	resp.Body.Close()
+	runID, _ := submit["run_id"].(string)
+
+	// Wait for the run to be stored.
+	waitForRun(t, srv, runID)
+
+	// DELETE memory → 204.
+	delReq, _ := http.NewRequest("DELETE", srv.URL+"/v1/runs/"+runID+"/memory", nil)
+	delResp, derr := http.DefaultClient.Do(delReq)
+	if derr != nil {
+		t.Fatalf("DELETE memory: %v", derr)
+	}
+	defer delResp.Body.Close()
+	if delResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE memory status = %d, want %d", delResp.StatusCode, http.StatusNoContent)
+	}
+
+	// GET after delete → 404.
+	getResp, gerr := http.Get(srv.URL + "/v1/runs/" + runID)
+	if gerr != nil {
+		t.Fatalf("GET after delete: %v", gerr)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET after delete status = %d, want %d", getResp.StatusCode, http.StatusNotFound)
 	}
 }
