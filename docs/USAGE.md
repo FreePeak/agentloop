@@ -37,7 +37,7 @@ Read this before you plan work around it. As of this writing:
 | HITL approval gate wired into the runner | **implemented, and it holds** (PR #16 fixed a wiring bug where the gate was built but passed as `nil`). The *hold* works; approval is recorded but does **not** resume the run — §3, §9 |
 | HTTP API, admin console, eval harness | **implemented** |
 | Model calls to onegw | **not yet** — there is no outbound client in the loop path |
-| The five built-in tools | **stubs** — each returns a canned `Success: true` (`internal/tools/registry_impl.go:40`) |
+| The five built-in tools | **stubs** — each returns a canned `Success: true` (`internal/tools/registry_impl.go:46`) |
 | The planner | **deterministic**, no model calls; model-driven planning is the documented production path |
 | M7 multi-agent (`internal/supervisor`) | **gated shut** by design — refused unless one of [PRD §10](PRD.md#10-multi-agent-stance)'s four conditions is met |
 
@@ -124,7 +124,7 @@ Approve by path instead, if you prefer: `POST /v1/runs/{id}/approvals/{step_id}`
 **What approving does — and does not do.** The decision lands in the audit
 ledger: step 0's record flips from `deny` to `approve` with reason `"operator
 approved"`. That is the whole effect. **The run does not resume.** `Run()`
-returned the moment the gate held (`internal/loop/runner.go:366` returns
+returned the moment the gate held (`internal/loop/runner.go:365` returns
 `result, nil`), so the stored result is still `paused_approval` with `steps: 0`
 and `spend_usd: 0`. Both approval handlers only record the decision and answer
 `{"approved":true}` (`cmd/agentloop/main.go:197`, `:211`) — neither re-invokes
@@ -152,7 +152,7 @@ Requests accept `goal` (required), `context`, `max_steps`, and `cost_budget`.
 |---|---|---|
 | `POST` | `/v1/runs` | submit a run → `201` + `{run_id, state}` |
 | `GET` | `/v1/runs/{id}` | run result: state, exit reason, steps |
-| `POST` | `/v1/runs/{id}/kill` | kill switch (P75) → state `killed` |
+| `POST` | `/v1/runs/{id}/kill` | sets state `killed` in the store (see §9: the live runner is not signalled) |
 | `GET` | `/v1/runs/{id}/events` | SSE stream: `event: step` …, `event: done` |
 | `DELETE` | `/v1/runs/{id}` | forget a run → `204`, then `404` |
 | `DELETE` | `/v1/runs/{id}/memory` | erase a run's memory → `204`, then `404` |
@@ -262,22 +262,32 @@ Stated plainly, so nobody discovers it the hard way:
 - **Approving does not resume a run.** The gate holds correctly, and the resume
   machinery exists (`prepareResume`, `internal/loop/m4.go:36`, called at
   `internal/loop/runner.go:268`) — but nothing connects an approval back to it.
-  `Run()` returns when it holds (`runner.go:366`) and neither approval handler
+  `Run()` returns when it holds (`runner.go:365`) and neither approval handler
   re-invokes it (`cmd/agentloop/main.go:197`, `:211`). `Check` also never
   consults an earlier approval: `CatApprove` records `deny` and holds on every
   pass (`internal/loop/approval.go:144`). Since all five built-in tool names are
   approve-category, a gated run therefore **cannot** make progress. This is the
   largest functional gap: HITL today is an audit record, not a gate you can pass
-  through. Two small changes close it — see §3.
+  through.
 - **No outbound model client.** The loop never calls onegw. Everything above
   runs against stubbed tools and a deterministic planner.
 - **The five tools are stubs.** `repo_search`/`repo_context` should reach LeanKG;
   `run_tests`/`write_file` should go through xdev rpc in a restricted workspace.
+- **The kill endpoint does not reach a live run.** `POST /v1/runs/{id}/kill`
+  rewrites the stored state to `killed` (`cmd/agentloop/main.go:114` sets
+  `result.State = StateKilled`, `:128` writes it back), but the handler never
+  calls `runner.Kill()`. That method sits unused by the service
+  (`internal/loop/runner.go:235`) even though `Run()` checks the kill channel at
+  every step boundary (`runner.go:280`). The stop is real for a run that has
+  already returned — as every gated run has, since all five tools are
+  approve-category — and cosmetic for one still working: the operator sees
+  `killed` while the loop keeps going and overwrites the state on completion.
 - **Tier routing is half-wired** — see §6.
 - **M7 is gated shut**, correctly: the gate is a measurement, not a milestone,
   and it opens only when a [PRD §10](PRD.md#10-multi-agent-stance) condition is
   actually met.
 
 In rough order: **the approval→resume path** (make `Check` honor an existing
-approval, then re-enter the loop from the checkpoint), a real onegw client and
-tier propagation, then LeanKG-backed retrieval, then xdev-rpc execution.
+approval, then re-enter the loop from the checkpoint), **the kill endpoint**
+(call `runner.Kill()` so a working run stops at its next step boundary), a real
+onegw client and tier propagation, then LeanKG-backed retrieval, then xdev-rpc execution.
