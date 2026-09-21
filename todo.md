@@ -9,11 +9,18 @@ real work at all · **P1** blocks a milestone's acceptance criteria · **P2**
 improves an already-passing path · **P3** deferred by design, revisit on a named
 trigger.
 
+CI exists as of 2026-09-21 (`.github/workflows/ci.yml`): a PR that breaks the
+build, the tests, the lint or the PRD now shows a red check — #27 closed.
+
+> **The workflow needs Actions minutes.** The repo is private, so the jobs fail
+> at dispatch on a billing limit until the org raises it; `make check` runs the
+> identical five steps locally in the meantime (both caveats are in
+> `docs/USAGE.md` §2).
+
 ## Open issues
 
 | Issue | Priority | Item |
 |-------|----------|------|
-| [#27](https://github.com/FreePeak/agentloop/issues/27) | **P1** | CI: nothing runs `go test` on a PR — M6's "deploys blocked on the suite" is not enforced |
 | [#21](https://github.com/FreePeak/agentloop/issues/21) | **P1** | onegw PR #110: verdict-driven combo reorder (System One pre-route UC-4; backends Jev/Laya behind onegw) |
 | [#20](https://github.com/FreePeak/agentloop/issues/20) | P2 | M6: HTMX console per `docs/UI-DESIGN.md` |
 | [#8](https://github.com/FreePeak/agentloop/issues/8) | P2 | System One guardrails (Jev/Laya): `Route()` done; wire screen + Laya sidecar parity + Jev↔Laya corpus — see `docs/JEV-INTEGRATION.md` |

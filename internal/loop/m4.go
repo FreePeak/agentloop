@@ -22,11 +22,11 @@ import (
 // idempotency map so restored steps do not re-fire (P26 +
 // NFR-4).
 type checkpoint struct {
-	StepIdx  int               `json:"step_idx"`
-	SpendUSD float64           `json:"spend_usd"`
-	Memory   []byte            `json:"memory"`
-	SeenArgs map[string]int    `json:"seen_args"`
-	Steps    []StepRecord      `json:"steps"`
+	StepIdx  int            `json:"step_idx"`
+	SpendUSD float64        `json:"spend_usd"`
+	Memory   []byte         `json:"memory"`
+	SeenArgs map[string]int `json:"seen_args"`
+	Steps    []StepRecord   `json:"steps"`
 }
 
 // prepareResume loads the latest durable checkpoint for the

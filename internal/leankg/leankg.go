@@ -83,7 +83,7 @@ func (c *Client) Query(ctx context.Context, req Request) (Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("leankg: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {

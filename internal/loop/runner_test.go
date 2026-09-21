@@ -29,9 +29,9 @@ func NewRunnerForTest(t *testing.T, maxSteps int, toolPick func(int, loop.Runner
 
 func TestConstants(t *testing.T) {
 	cases := []struct {
-		name  string
-		got   int
-		want  int
+		name string
+		got  int
+		want int
 	}{
 		{"MaxSteps", loop.MaxSteps, 9},
 		{"WallClockS", loop.WallClockS, 120},

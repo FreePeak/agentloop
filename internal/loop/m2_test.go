@@ -11,8 +11,8 @@ import (
 
 	"github.com/FreePeak/agentloop/internal/budget"
 	"github.com/FreePeak/agentloop/internal/loop"
-	"github.com/FreePeak/agentloop/internal/tracer"
 	"github.com/FreePeak/agentloop/internal/tools"
+	"github.com/FreePeak/agentloop/internal/tracer"
 )
 
 // newRunnerForTrace creates a LoopRunner with a tracer for M2 tests.

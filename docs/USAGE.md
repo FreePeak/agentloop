@@ -67,7 +67,7 @@ steps are listed at the end.
 make            # list targets
 make build      # -> ./agentloop (gitignored)
 make run        # builds, then serves on :8081
-make check      # tests + lint, before a PR
+make check      # everything CI runs, before a PR
 make prd        # the PRD asserts its own promises (12 properties)
 ```
 
@@ -76,10 +76,11 @@ make prd        # the PRD asserts its own promises (12 properties)
 | `build` | `go build -o agentloop ./cmd/agentloop` |
 | `run` | builds, then runs with `AGENTLOOP_PORT=$(PORT)` (default 8081) |
 | `test` | `go test ./...` |
-| `check` | `test` + `lint` |
-| `lint` / `vet` / `fmt` | `golangci-lint` / `go vet` / `go fmt` |
+| `check` | `fmt-check` + `vet` + `test` + `lint` + `prd` — exactly what CI runs |
+| `fmt-check` | fails on any file `gofmt -l ./cmd ./internal` disagrees with |
+| `lint` / `vet` / `fmt` | `golangci-lint` (`.golangci.yml`) / `go vet` / `go fmt` |
 | `tidy` | `go mod tidy` |
-| `prd` | `python3 docs/check-prd.py` |
+| `prd` | `python3 docs/check-prd.py` — the PRD asserts its own promises |
 | `smoke` | submits one run and prints the response |
 | `clean` | removes the built binary |
 

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -152,7 +153,7 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) {
 	}()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]any{"run_id": runID, "state": loop.StateThinking})
+	writeJSON(w, map[string]any{"run_id": runID, "state": loop.StateThinking})
 }
 
 func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
@@ -165,7 +166,7 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	writeJSON(w, result)
 }
 
 func (s *Server) killRun(w http.ResponseWriter, r *http.Request) {
@@ -195,7 +196,7 @@ func (s *Server) killRun(w http.ResponseWriter, r *http.Request) {
 	s.runs[runID] = result
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	writeJSON(w, result)
 }
 
 func (s *Server) deleteRun(w http.ResponseWriter, r *http.Request) {
@@ -239,7 +240,7 @@ func (s *Server) getApprovals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"run_id": runID, "approvals": gate.Ledger(), "state": result.State})
+	writeJSON(w, map[string]any{"run_id": runID, "approvals": gate.Ledger(), "state": result.State})
 }
 
 func (s *Server) submitApproval(w http.ResponseWriter, r *http.Request) {
@@ -276,7 +277,7 @@ func (s *Server) submitApproval(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"approved": approved})
+	writeJSON(w, map[string]any{"approved": approved})
 }
 
 func (s *Server) submitApprovalByID(w http.ResponseWriter, r *http.Request) {
@@ -301,7 +302,7 @@ func (s *Server) submitApprovalByID(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"approved": approved})
+	writeJSON(w, map[string]any{"approved": approved})
 }
 
 func parseApprovalPath(path string) (string, int) {
@@ -330,11 +331,11 @@ func (s *Server) evalReportHandler(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(eval.Report{SuiteID: "default", Total: 0, Passed: 0, PassRate: 0, ByCategory: map[string]float64{}})
+		writeJSON(w, eval.Report{SuiteID: "default", Total: 0, Passed: 0, PassRate: 0, ByCategory: map[string]float64{}})
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(report)
+	writeJSON(w, report)
 }
 
 func (s *Server) runsListHandler(w http.ResponseWriter, r *http.Request) {
@@ -345,7 +346,7 @@ func (s *Server) runsListHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"runs": runs})
+	writeJSON(w, map[string]any{"runs": runs})
 }
 
 func (s *Server) consoleRunsPage(w http.ResponseWriter, r *http.Request) {
@@ -353,7 +354,7 @@ func (s *Server) consoleRunsPage(w http.ResponseWriter, r *http.Request) {
 	runCount := len(s.runs)
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "text/html")
-	fmt.Fprintf(w, "<html><body><h1>Runs</h1><p>Total: %d</p></body></html>", runCount)
+	writeConsole(w, "<html><body><h1>Runs</h1><p>Total: %d</p></body></html>", runCount)
 }
 
 func (s *Server) consoleApprovalsPage(w http.ResponseWriter, r *http.Request) {
@@ -366,7 +367,7 @@ func (s *Server) consoleApprovalsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "text/html")
-	fmt.Fprintf(w, "<html><body><h1>Approvals</h1><p>Pending: %d</p></body></html>", pending)
+	writeConsole(w, "<html><body><h1>Approvals</h1><p>Pending: %d</p></body></html>", pending)
 }
 
 func (s *Server) consoleKillHandler(w http.ResponseWriter, r *http.Request) {
@@ -394,7 +395,7 @@ func (s *Server) consoleKillHandler(w http.ResponseWriter, r *http.Request) {
 	s.runs[runID] = result
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	writeJSON(w, result)
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
@@ -413,14 +414,14 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	for _, step := range result.Steps {
 		evt := map[string]any{"step_id": step.StepID, "tool": step.Tool, "phase": step.Phase}
 		b, _ := json.Marshal(evt)
-		fmt.Fprintf(w, "event: step\ndata: %s\n\n", b)
+		writeConsole(w, "event: step\ndata: %s\n\n", b)
 		if flush != nil {
 			flush.Flush()
 		}
 	}
 	done := map[string]any{"state": result.State, "exit_reason": result.ExitReason}
 	b, _ := json.Marshal(done)
-	fmt.Fprintf(w, "event: done\ndata: %s\n\n", b)
+	writeConsole(w, "event: done\ndata: %s\n\n", b)
 	if flush != nil {
 		flush.Flush()
 	}
@@ -444,12 +445,30 @@ func extractRunID(path string) string {
 
 func boolPtr(b bool) *bool { return &b }
 
+// writeJSON writes one JSON body. A failure here cannot be reported to the
+// client — the status line and headers are already on the wire — so the error
+// is explicitly discarded rather than left unchecked, and the request is
+// logged so a broken client is still visible.
+func writeJSON(w http.ResponseWriter, v any) {
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("write response: %v", err)
+	}
+}
+
 // m6SuiteCases returns the M6 acceptance suite (PRD §11.4) used as
 // the deploy gate. It delegates to eval.DefaultSuite so the suite
 // definition lives in one place (internal/eval) and the HTTP handler
 // stays a thin wire.
 func m6SuiteCases() []eval.Case {
 	return eval.DefaultSuite()
+}
+
+// writeConsole is writeJSON's counterpart for the HTML and SSE surfaces,
+// where a failed write is equally unreportable and equally worth logging.
+func writeConsole(w http.ResponseWriter, format string, args ...any) {
+	if _, err := fmt.Fprintf(w, format, args...); err != nil {
+		log.Printf("write console: %v", err)
+	}
 }
 
 func main() {
@@ -475,5 +494,7 @@ func main() {
 	}
 	addr := ":" + port
 	fmt.Printf("agentloop listening on %s\n", addr)
-	http.ListenAndServe(addr, mux)
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Fatalf("serve: %v", err)
+	}
 }

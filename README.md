@@ -22,8 +22,12 @@ goal + budget in, answer / handoff / escalation out.
 ```bash
 make            # list targets
 make run        # build + serve on :8081 (onegw owns 8080)
-make check      # tests + lint — before a PR
+make check      # everything CI runs: fmt-check, vet, test, lint, prd
 ```
+
+CI (`.github/workflows/ci.yml`) runs exactly those five steps on every pull
+request, plus `docs/check-prd.py --selftest` — so "all green" is a check's
+verdict, not a claim in a PR description.
 
 Submit a run and watch it go to work:
 

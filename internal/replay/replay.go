@@ -12,13 +12,13 @@ import (
 
 // ReplayResult is the outcome of replaying a trace.
 type ReplayResult struct {
-	RunID      string
-	SpanCount  int
-	Kinds      map[string]int // kind → count
-	Errors     []string
-	Warnings   []string
+	RunID         string
+	SpanCount     int
+	Kinds         map[string]int // kind → count
+	Errors        []string
+	Warnings      []string
 	CycleDetected bool
-	DedupHits  int
+	DedupHits     int
 }
 
 // Replay reconstructs a run summary from traced spans.
@@ -26,9 +26,9 @@ type ReplayResult struct {
 func Replay(t *tracer.Tracer, runID string) ReplayResult {
 	spans := t.RunSpans(runID)
 	r := ReplayResult{
-		RunID:   runID,
+		RunID:     runID,
 		SpanCount: len(spans),
-		Kinds:   make(map[string]int),
+		Kinds:     make(map[string]int),
 	}
 
 	seen := make(map[string]int) // tool name → count (dedup check)

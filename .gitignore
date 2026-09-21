@@ -1,3 +1,7 @@
+# The built binary (Makefile: `build` -> ./agentloop).
+# `!cmd/agentloop/` un-ignores the SOURCE directory of the same name — without
+# it the bare pattern above also matched the directory and silently hid every
+# new file added under cmd/agentloop/ (found the hard way: cmd/agentloop/
+# debug_test.go had been invisible to git).
 agentloop
-!cmd/agentloop/
 !cmd/agentloop/
