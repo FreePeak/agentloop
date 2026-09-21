@@ -24,7 +24,7 @@ your caller ──▶ agentloop  (policy: tiers, budget, approval, kill)
                    onegw    (transport: which provider, fallback, usage)
                      │
                      ▼
-            DeepSeek / kilo-code / TypeSafe JEV / …
+            DeepSeek / kilo-code / System One (Jev cloud · Laya local) / …
 ```
 
 ### Honest status
@@ -205,7 +205,7 @@ deliberately separate.
 
 Exit reasons: `max_steps`, `wall_clock`, `cost_budget`, `daily_budget`,
 `confidence_floor`, `progress_stall`, `consecutive_failures`,
-`guardrail_block` (the TypeSafe screen refused).
+`guardrail_block` (the System One screen refused — Jev or Laya via onegw).
 
 Defaults, each a sourced prior rather than a guess (`internal/loop/exitreason.go`):
 `max_steps` 9, `wall_clock` 120s, `cost_budget` $1.00/run, daily ceiling 20× that.
@@ -219,7 +219,7 @@ The runner routes each step to a **tier**, and a tier is an onegw *combo name* �
 |---|---|---|
 | `planning` | reasoning | `opencode/deepseek-v4.1-flash` |
 | `execution` | coding | `kilocode/kilo-auto/free` |
-| `tiny` | execution + classify | TypeSafe JEV |
+| `tiny` | execution + classify | System One (`POST /v1/systemone`: Jev and/or Laya) |
 
 Two things to know before you rely on this:
 
@@ -264,7 +264,7 @@ Package map:
 | `internal/memory`, `internal/store` | four-tier memory, SQLite checkpoints |
 | `internal/tracer`, `internal/replay` | spans, replay |
 | `internal/eval` | eval harness and deploy gate |
-| `internal/experiments` | the TypeSafe guardrail screen |
+| `internal/experiments` | System One guardrail `Route()` (backend-agnostic) |
 | `internal/supervisor` | M7 multi-agent, gated by PRD §10 |
 
 ## 9. What is not built yet
@@ -307,3 +307,21 @@ In rough order: a **model-driven planner** (`query` retrieval and onegw
 synthesis both exist now; planning is the last deterministic piece), then
 xdev-rpc execution for `run_tests`/`write_file`, and with it the tier
 propagation of §6.
+
+## 10. System One (Jev / Laya)
+
+Decision calls (guardrails, classify, closed-set tool pick, trust scores) use
+**System One** over onegw — never a direct TypeSafe or Laya import in this repo.
+
+| Backend | How onegw reaches it | When to use |
+|---|---|---|
+| **Jev** (TypeSafe cloud) | `kind = "systemone"`, `https://api.typesafe.ai` | prod primary until local parity is measured |
+| **Laya** (local Apache-2) | same `/v1/systemone` path on a local sidecar | CI, air-gap, cost-zero dev; ~60–95 ms warm on M2 Pro |
+
+Agentloop sends `{state, model, questions}`; owns thresholds via
+`internal/experiments.Route` (strict/permissive). Full contract, cookbook use
+cases, RSS numbers, and build sequence:
+[`JEV-INTEGRATION.md`](JEV-INTEGRATION.md).
+
+Open work: phase-boundary screen (#8), onegw combo reorder (#21 / onegw PR #110),
+sub-agent trust battery (#15), Laya sidecar + Jev↔Laya corpus agreement.

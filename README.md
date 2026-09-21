@@ -12,6 +12,7 @@ goal + budget in, answer / handoff / escalation out.
 | What | Where |
 |---|---|
 | **How to build, run, and operate it** | [`docs/USAGE.md`](docs/USAGE.md) |
+| **System One (Jev hosted · Laya local)** | [`docs/JEV-INTEGRATION.md`](docs/JEV-INTEGRATION.md) |
 | The PRD (23 sections, 4 appendices) | [`docs/PRD.md`](docs/PRD.md) |
 | The canonical architecture this PRD summarizes | [`../design.md`](../design.md) — at repo root |
 | The runnable check the ten review loops were run by | [`docs/check-prd.py`](docs/check-prd.py) |

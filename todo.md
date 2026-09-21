@@ -14,11 +14,11 @@ trigger.
 | Issue | Priority | Item |
 |-------|----------|------|
 | [#27](https://github.com/FreePeak/agentloop/issues/27) | **P1** | CI: nothing runs `go test` on a PR — M6's "deploys blocked on the suite" is not enforced |
-| [#21](https://github.com/FreePeak/agentloop/issues/21) | **P1** | onegw PR #110: verdict-driven combo reorder for agentloop tier routing |
+| [#21](https://github.com/FreePeak/agentloop/issues/21) | **P1** | onegw PR #110: verdict-driven combo reorder (System One pre-route UC-4; backends Jev/Laya behind onegw) |
 | [#20](https://github.com/FreePeak/agentloop/issues/20) | P2 | M6: HTMX console per `docs/UI-DESIGN.md` |
-| [#8](https://github.com/FreePeak/agentloop/issues/8) | P2 | TypeSafe guardrail screening experiments + containment proposal (the `Route()` half is implemented; the checklist is not ticked) |
+| [#8](https://github.com/FreePeak/agentloop/issues/8) | P2 | System One guardrails (Jev/Laya): `Route()` done; wire screen + Laya sidecar parity + Jev↔Laya corpus — see `docs/JEV-INTEGRATION.md` |
 | [#19](https://github.com/FreePeak/agentloop/issues/19) | P3 | M7: re-evaluate `EvaluateGate` when the tool registry grows past 10 |
-| [#15](https://github.com/FreePeak/agentloop/issues/15) | P3 | Agent-to-agent trust scoring via TypeSafe Noul |
+| [#15](https://github.com/FreePeak/agentloop/issues/15) | P3 | Agent-to-agent trust scoring via System One Noul (Jev or Laya local) — UC-3 in `docs/JEV-INTEGRATION.md` |
 | [#28](https://github.com/FreePeak/agentloop/issues/28) | P3 | Tracker hygiene: priority labels + close-on-merge |
 
 ## Not tracked as issues, by design
