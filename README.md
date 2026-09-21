@@ -74,7 +74,8 @@ python3 docs/check-prd.py            # the PRD asserts its own load-bearing prom
 python3 docs/check-prd.py --selftest # proves the check can actually fail
 ```
 
-`docs/check-prd.py` asserts 12 properties of `docs/PRD.md`: every internal §
+`docs/check-prd.py` asserts 12 properties of `docs/PRD.md` (all passing, and its
+own `--selftest` catches all 12 deliberate breakages): every internal §
 reference resolves, all 100 App. B patterns are accounted for, every FR/NFR
 carries a sourced why, no default row has a vague source, §6 exposes the shapes
 a builder needs (state/exit enums, run/step/idempotency/approval rows, wire

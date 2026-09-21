@@ -61,17 +61,33 @@ SOURCED_OPENINGS = {
 def check(text: str) -> list[str]:
     fail: list[str] = []
 
-    # 1. every internal §N reference resolves to a heading that exists
-    heads = {m.group(1) for m in re.finditer(r"^#{2,3} (\d+(?:\.\d+)?)\.?\s", text, re.M)}
-    dangling = sorted(r for r in set(re.findall(r"§(\d+(?:\.\d+)?)", text)) if r not in heads)
+    # 1. every internal §N reference resolves to a heading that exists.
+    # Cross-document refs are stripped first: a footer line citing
+    # "docs/JEV-INTEGRATION.md §3.4" points at that file's sections, not
+    # this one, and counting it here was a standing false FAIL.
+    # A file ref can carry a slash-chain of sections (`JEV-INTEGRATION.md`
+    # §3.1/§3.4/§3.5) — the whole chain belongs to that file.
+    own = re.sub(r"(?:docs/)?[A-Za-z0-9_.-]+\.md`?\s*§\s*\d+(?:\.\d+)?"
+                 r"(?:\s*/\s*§\s*\d+(?:\.\d+)?)*", "", text.replace("`", ""))
+    heads = {m.group(1) for m in re.finditer(r"^#{2,3} (\d+(?:\.\d+)?)\.?\s", own, re.M)}
+    dangling = sorted(r for r in set(re.findall(r"§(\d+(?:\.\d+)?)", own)) if r not in heads)
     if dangling:
         fail.append(f"internal refs with no section: {dangling}")
 
     # 2. all 100 App. B patterns are accounted for (adopted / deferred / rejected)
     covered = {int(n) for n in re.findall(r"P(\d+)", text)}
-    if covered != PATTERNS:
-        missing = sorted(PATTERNS - covered)
+    missing = sorted(PATTERNS - covered)
+    if missing:
         fail.append(f"patterns not accounted for: {missing}")
+    # An out-of-range token (P0, P101, …) is a citation that cannot point at a
+    # real pattern. Reported separately: lumping it into `missing` printed an
+    # empty list, which is a finding no one can act on.
+    # P0 is excluded on purpose: the pattern namespace starts at P1, so a
+    # "P0" in this document is a priority label (docs/PRD.md §13 defines
+    # P0–P3), not a citation. Anything else outside the ledger is a typo.
+    extra = sorted(n for n in covered - PATTERNS if n != 0)
+    if extra:
+        fail.append(f"pattern tokens outside the 1–100 ledger: {extra}")
     if "## 20. Appendix D" not in text:
         fail.append("pattern ledger (§20) is missing")
 
@@ -180,7 +196,9 @@ MUTATIONS = [
     ("a § reference dangles", "see §15)", "see §99)"),
     ("§10 loses its attribution", "**Single agent in v1 (Ch.7).**", "**Single agent in v1.**"),
     ("§8 loses its attribution", "## 8. Error taxonomy & recovery (Ch.12)", "## 8. Error taxonomy & recovery"),
-    ("the footer stamp is dropped", "*Last updated:", "*Last change:"),
+    # Every stamp, not just the first: the PRD keeps a version list, and only
+    # stripping all of them is a document without one.
+    ("the footer stamp is dropped", "Last updated:", "Last change:"),
     ("the pattern ledger is renamed", "## 20. Appendix D", "## 20. Appendix Z"),
     ("the parity harness is dropped", "**Config changes also run the paired parity comparison**", "**Config changes also run a cost comparison**"),
     ("the SSE event names are dropped", "`state`, `step`, `approval`, `done`", "several event types"),
@@ -196,7 +214,9 @@ def selftest(text: str) -> int:
         if old not in text:
             blind.append(f"{name} (anchor text not found — update the fixture)")
             continue
-        if not check(text.replace(old, new, 1)):
+        # The footer-mutation must hit every stamp, so it is not anchored to one.
+        mutated = text.replace(old, new) if name == "the footer stamp is dropped" else text.replace(old, new, 1)
+        if not check(mutated):
             blind.append(name)
     if blind:
         print(f"BLIND SPOTS in the check itself ({len(blind)}):")
