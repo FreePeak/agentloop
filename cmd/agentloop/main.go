@@ -18,12 +18,14 @@ import (
 	"github.com/FreePeak/agentloop/internal/budget"
 	"github.com/FreePeak/agentloop/internal/eval"
 	"github.com/FreePeak/agentloop/internal/loop"
+	"github.com/FreePeak/agentloop/internal/onegw"
 	"github.com/FreePeak/agentloop/internal/planner"
 	"github.com/FreePeak/agentloop/internal/tools"
 )
 
 // Server holds the in-memory run store, the runner/gate registry,
-// the tool registry, and the M6 eval runner that gates deploys.
+// the tool registry, the M6 eval runner that gates deploys, and the
+// M8 model transport shared by every run.
 type Server struct {
 	mu         sync.Mutex
 	runs       map[string]loop.RunResult
@@ -31,20 +33,41 @@ type Server struct {
 	gates      map[string]*loop.ApprovalGate
 	tools      tools.ToolRegistry
 	evalRunner *eval.Runner
+	model      *onegw.Client
 }
 
-// NewServer creates a Server with the 5 v1 tools and empty stores.
+// NewServer creates a Server with the 4 v1 tools and empty stores.
+//
+// The model transport comes from the environment, because the endpoint
+// and the combo are deployment facts, not code:
+//
+//	AGENTLOOP_ONEGW_URL    default http://127.0.0.1:8080
+//	AGENTLOOP_ONEGW_KEY    bearer key; empty sends no Authorization header
+//	AGENTLOOP_ONEGW_COMBO  routing combo used as the wire model, default "dev"
 func NewServer() *Server {
 	return &Server{
 		runs:    make(map[string]loop.RunResult),
 		runners: make(map[string]*loop.LoopRunner),
 		gates:   make(map[string]*loop.ApprovalGate),
 		tools:   tools.NewRegistry(),
+		model: onegw.New(
+			envOr("AGENTLOOP_ONEGW_URL", "http://127.0.0.1:8080"),
+			os.Getenv("AGENTLOOP_ONEGW_KEY"),
+			envOr("AGENTLOOP_ONEGW_COMBO", "dev"),
+		),
 		evalRunner: eval.NewRunner(func(cfg loop.RunnerConfig) (*loop.LoopRunner, *budget.Guard, tools.ToolRegistry, error) {
 			return loop.NewRunner(cfg, budget.New(cfg.CostBudget, float64(loop.DailyCeilingMult)*cfg.CostBudget), tools.NewRegistry()),
 				budget.New(cfg.CostBudget, float64(loop.DailyCeilingMult)*cfg.CostBudget), tools.NewRegistry(), nil
 		}),
 	}
+}
+
+// envOr returns the environment value for key, or def when unset/empty.
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 type runRequest struct {
@@ -83,6 +106,10 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) {
 		Goal:       body.Goal,
 		Context:    body.Context,
 		Gate:       gate,
+		// M8: the loop can call the portfolio's gateway for synthesis.
+		// The eval runner deliberately gets no model — the deploy gate
+		// must stay deterministic and offline.
+		Model: s.model,
 	}
 	runner := loop.NewRunnerWithPlannerAndGate(cfg, guard, s.tools, planner.NewPlanner(), gate)
 	s.mu.Lock()
