@@ -18,6 +18,8 @@ import (
 
 	"github.com/FreePeak/agentloop/internal/budget"
 	"github.com/FreePeak/agentloop/internal/eval"
+	"github.com/FreePeak/agentloop/internal/experiments"
+	"github.com/FreePeak/agentloop/internal/guardrail"
 	"github.com/FreePeak/agentloop/internal/leankg"
 	"github.com/FreePeak/agentloop/internal/loop"
 	"github.com/FreePeak/agentloop/internal/onegw"
@@ -40,6 +42,10 @@ type Server struct {
 	// sandboxDir is the workspace sandboxed turns run in; empty when no
 	// executor is configured.
 	sandboxDir string
+	// guardrail screens every message against the System One battery
+	// (§7.2). Nil means no screen is configured, which the run records as
+	// errors rather than reporting as a clean verdict.
+	guardrail *guardrail.Client
 }
 
 // NewServer creates a Server with the v1 tool set and empty stores.
@@ -68,6 +74,7 @@ func NewServer() *Server {
 		gates:      make(map[string]*loop.ApprovalGate),
 		tools:      reg,
 		sandboxDir: sandboxDir,
+		guardrail:  guardrailFromEnv(),
 		model: onegw.New(
 			envOr("AGENTLOOP_ONEGW_URL", "http://127.0.0.1:8080"),
 			os.Getenv("AGENTLOOP_ONEGW_KEY"),
@@ -105,6 +112,54 @@ func envOr(key, def string) string {
 //
 // No LeanKG API key: the service is local and its REST surface is
 // unauthenticated by design for a single-tenant deployment (PRD §7.4).
+// guardrailFromEnv builds the System One screening client.
+//
+//	AGENTLOOP_GUARDRAIL_URL    endpoint root (onegw, or TypeSafe directly);
+//	                           unset means NO screen, and runs record that
+//	AGENTLOOP_GUARDRAIL_KEY    bearer key (Jev); a local Laya needs none
+//	AGENTLOOP_GUARDRAIL_MODEL  default jev-latest
+//
+// There is deliberately no default URL: pointing the screen at a gateway
+// that does not serve /v1/systemone would turn every step into a failed
+// screen, and a run that is unscreened must say so rather than pretend.
+func guardrailFromEnv() *guardrail.Client {
+	url := os.Getenv("AGENTLOOP_GUARDRAIL_URL")
+	if url == "" {
+		return nil
+	}
+	return guardrail.New(url, os.Getenv("AGENTLOOP_GUARDRAIL_KEY"), os.Getenv("AGENTLOOP_GUARDRAIL_MODEL"))
+}
+
+// screenFunc adapts the client to the loop's screen hook. A nil client
+// yields nil, so the runner's "no screen configured" path is what runs —
+// not a screen that always passes.
+func (s *Server) screenFunc() loop.ScreenFunc {
+	if s.guardrail == nil {
+		return nil
+	}
+	return func(text string) (map[string]float64, float64, error) {
+		v, err := s.guardrail.Screen(context.Background(), text)
+		if err != nil {
+			return nil, 0, err
+		}
+		return v.Nouls, v.Severity, nil
+	}
+}
+
+// screenGoal judges the submitted goal before any step runs. It returns
+// the routed action ("pass"/"review"/"block") or an error when the screen
+// could not run — which the caller records rather than treating as clean.
+func (s *Server) screenGoal(goal string) (string, error) {
+	if s.guardrail == nil {
+		return "", nil
+	}
+	v, err := s.guardrail.Screen(context.Background(), goal)
+	if err != nil {
+		return "", err
+	}
+	return experiments.Route(v.Nouls, v.Severity, experiments.Strict), nil
+}
+
 // tiersFromEnv maps this loop's three routing tiers onto onegw combos.
 //
 // The gateway ships whatever combos an operator configured — in this
@@ -221,7 +276,58 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) {
 		// must stay deterministic and offline.
 		Model: s.model,
 	}
-	runner := loop.NewRunnerWithPlannerAndGate(cfg, guard, s.tools, planner.NewPlanner(), gate)
+	runner := loop.NewRunnerWithPlannerAndGate(cfg, guard, s.tools, planner.NewPlanner(), gate).
+		WithGuardrailScreen(s.screenFunc())
+
+	// Screen the GOAL before the loop takes a step (§7.2: "the model
+	// context is the injection surface" — the goal is the first thing that
+	// enters it). A block here is the run never starting, which is the
+	// correct outcome for an injection; a review holds it for a human.
+	if verdict, err := s.screenGoal(body.Goal); err != nil {
+		runResult := loop.RunResult{
+			RunID:        runID,
+			State:        loop.StateExhausted,
+			ExitReason:   loop.ExitGuardrailBlock,
+			ScreenErrors: []string{err.Error()},
+		}
+		runResult.Success = boolPtr(false)
+		s.mu.Lock()
+		s.runs[runID] = runResult
+		s.mu.Unlock()
+		// The run id must reach the caller even when the goal is blocked:
+		// a 201 with no body is a client that cannot look up what happened.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(w, map[string]any{"run_id": runID, "state": runResult.State, "exit_reason": runResult.ExitReason})
+		return
+	} else if verdict != "" && verdict != "pass" {
+		state := loop.StateExhausted
+		if verdict == "review" {
+			state = loop.StatePausedApproval
+		}
+		runResult := loop.RunResult{
+			RunID:      runID,
+			State:      state,
+			ExitReason: loop.ExitGuardrailBlock,
+			Steps: []loop.StepRecord{{
+				StepID: 0,
+				Phase:  "evaluate",
+				Tool:   "(goal screen)",
+				Why:    "guardrail: " + verdict,
+				Screens: []loop.ScreenResult{{
+					Hazard: "noul_battery", Action: verdict,
+				}},
+			}},
+		}
+		runResult.Success = boolPtr(false)
+		s.mu.Lock()
+		s.runs[runID] = runResult
+		s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(w, map[string]any{"run_id": runID, "state": runResult.State, "exit_reason": runResult.ExitReason})
+		return
+	}
 	s.mu.Lock()
 	s.runners[runID] = runner
 	s.gates[runID] = gate

@@ -46,6 +46,9 @@ func (t Tierless) ChatTier(ctx context.Context, _ string, msgs ...onegw.Message)
 // Cost note: when the budget ceiling fires, this call is exactly what the
 // 10% pre-synthesis reserve exists to fund (PRD §17, budget.PreSynthReserve).
 func (r *LoopRunner) synthesize(ctx context.Context, result *RunResult) error {
+	// Every exit path calls this, so it is where the run's accumulated
+	// observations are finalised.
+	r.flushScreenErrors(result)
 	if r.model == nil {
 		result.PartialSynthesis = synthesizePartial(result.Steps)
 		return nil
