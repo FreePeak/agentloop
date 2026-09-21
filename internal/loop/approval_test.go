@@ -1,9 +1,13 @@
 package loop
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/FreePeak/agentloop/internal/budget"
+	"github.com/FreePeak/agentloop/internal/tools"
 )
 
 func TestCategorize(t *testing.T) {
@@ -93,6 +97,68 @@ func TestApprovalGate_ApproveCategoryAlwaysPending(t *testing.T) {
 	}
 	if len(g.Pending()) != 1 {
 		t.Errorf("Pending() = %d, want 1", len(g.Pending()))
+	}
+}
+
+// TestApprovalGate_ApproveEnablesResume proves the M5
+// approval → resume gap is closed: a held CatApprove step
+// re-checks the gate after the operator approves and runs,
+// instead of denying on every pass (the pre-fix behaviour,
+// where Approve() only flipped a ledger entry and the run
+// stayed paused forever).
+func TestApprovalGate_ApproveEnablesResume(t *testing.T) {
+	gate := NewApprovalGate()
+	guard := budget.New(100.0, 200.0)
+	reg := tools.NewRegistry()
+	// Step 0 is a CatApprove tool (held); step 1+ are reads.
+	pick := func(step int, cfg RunnerConfig) (string, map[string]any) {
+		if step == 0 {
+			return "delete", map[string]any{"path": "/tmp/x"}
+		}
+		return "read", map[string]any{"path": "/tmp/y"}
+	}
+	cfg := RunnerConfig{
+		RunID:    "resume-gap",
+		MaxSteps: 3,
+		Goal:     "resume test",
+		Gate:     gate,
+	}
+	runner := NewRunnerWithApprovalGate(cfg, guard, reg, pick, gate)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	result, err := runner.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.State != StatePausedApproval {
+		t.Fatalf("initial state = %q, want paused_approval", result.State)
+	}
+
+	// Approve the held step. Before the fix this was a no-op:
+	// the gate denied CatApprove on every pass, so Resume()
+	// re-entered the loop and paused again on the same step.
+	if !gate.Approve("resume-gap", 0) {
+		t.Fatal("Approve(step 0) = false, want true (was pending)")
+	}
+
+	resumed, err := runner.Resume(ctx)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if resumed.State == StatePausedApproval {
+		t.Fatalf("resumed state = %q, want anything but paused_approval (approval did not resume the run)", resumed.State)
+	}
+	// The held step must have executed on resume — the
+	// ledger now carries an approve for runID:step 0.
+	found := false
+	for _, rec := range gate.Ledger() {
+		if rec.RunID == "resume-gap" && rec.StepID == 0 && rec.Decision.Action == "approve" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("ledger has no approved decision for runID:step 0 after resume")
 	}
 }
 

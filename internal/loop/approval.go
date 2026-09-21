@@ -74,6 +74,7 @@ type ApprovalGate struct {
 	ledger          []ApprovalRecord
 	timeNow         func() time.Time // overridable for tests
 	pendingDecisions map[string]Decision // runID:step → pending approve
+	approvedKeys    map[string]bool      // runID:step → operator approved (resume path)
 }
 
 // NewApprovalGate returns a gate with M5 defaults:
@@ -84,6 +85,7 @@ func NewApprovalGate() *ApprovalGate {
 		MinConfidence:    0.7,
 		timeNow:          time.Now,
 		pendingDecisions: make(map[string]Decision),
+		approvedKeys:     make(map[string]bool),
 	}
 }
 
@@ -142,6 +144,19 @@ func (g *ApprovalGate) Check(req ApprovalRequest) Decision {
 		g.ledger = append(g.ledger, ApprovalRecord{req, d})
 		return d
 	case CatApprove:
+		// Resume path: if the operator already approved this
+		// (runID:step), the re-check approves instead of
+		// re-denying. Without this CatApprove denies on every
+		// pass and approval is a no-op (issue: approval →
+		// resume gap).
+		if g.approvedKeys[req.Key()] {
+			d := Decision{Action: "approve", Category: CatApprove,
+				Reason: "operator approved (resume re-check)",
+				Timestamp: g.timeNow()}
+			g.ledger = append(g.ledger, ApprovalRecord{req, d})
+			delete(g.pendingDecisions, req.Key())
+			return d
+		}
 		// Hold pending; operator decides via Server.approve.
 		d := Decision{Action: "deny", Category: CatApprove,
 			Reason: "high-impact: approval required (P30 always_approve)",
@@ -160,6 +175,12 @@ func (g *ApprovalGate) Check(req ApprovalRequest) Decision {
 
 // Approve marks a pending request as approved by the operator.
 // Returns false if the request was not pending (already decided).
+//
+// M5 resume path: the runner re-checks the gate for the held
+// step after the operator approves. Approve() records the key
+// so the re-check approves instead of re-denying — without
+// this, CatApprove denies on every pass and approval is a
+// no-op (issue: approval → resume gap).
 func (g *ApprovalGate) Approve(runID string, stepID int) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -173,6 +194,7 @@ func (g *ApprovalGate) Approve(runID string, stepID int) bool {
 			g.ledger[i].Decision = Decision{Action: "approve", Category: Categorize(r.Tool),
 				Reason: "operator approved", Timestamp: g.timeNow()}
 			delete(g.pendingDecisions, key)
+			g.approvedKeys[key] = true // resume path: re-check approves
 			return true
 		}
 	}

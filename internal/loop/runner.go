@@ -100,6 +100,7 @@ type LoopRunner struct {
 	gate                *ApprovalGate                                   // M5: fail-closed HITL gate (nil = bypass, tests)
 	guardrailScreen     func(string, any) (map[string]float64, float64) // M2.x: TypeSafe screen
 	pausedStep          int                                             // step held at paused_approval (M5)
+	lastResult          RunResult                                       // partial result at pause (M5 resume)
 }
 
 // NewRunner returns a LoopRunner for the given config.
@@ -209,6 +210,8 @@ func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 		planner:         planner,
 		checkpointStore: cps,
 		gate:            gate,
+		pausedStep:      -1,
+		lastResult:      RunResult{},
 	}
 }
 
@@ -242,39 +245,79 @@ func (r *LoopRunner) Kill() {
 
 // Run executes the bounded loop and returns the RunResult.
 func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
+	return r.runWith(ctx, true)
+}
+
+// Resume re-enters a run that paused for operator approval
+// (M5). The runner rewinds to the held step and re-checks
+// the gate; if the operator approved, the step runs and the
+// loop continues. Returns the final result. Safe to call
+// only from a paused run; calling it on a finished run
+// returns the last result unchanged.
+func (r *LoopRunner) Resume(ctx context.Context) (RunResult, error) {
+	if r.pausedStep < 0 {
+		return r.lastResult, nil
+	}
+	return r.runWith(ctx, false)
+}
+
+// runWith builds the run state and delegates the loop to
+// runLoop. fresh=true (Run) initializes; fresh=false
+// (Resume) rewinds to the paused step from r.lastResult.
+func (r *LoopRunner) runWith(ctx context.Context, fresh bool) (RunResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.WallClock)
 	defer cancel()
 
-	result := RunResult{
-		RunID:            r.cfg.RunID,
-		State:            StateThinking,
-		Steps:            []StepRecord{},
-		SpendUSD:         0,
-		CurrentTier:      r.tierForStep(0, r.cfg),
-		PartialSynthesis: "",
-	}
-
-	// --- M3: build the plan once before the first step ---
-	if r.planner != nil {
-		r.plan = r.planner.Plan(planner.PlannerConfig{
-			Goal:    r.cfg.Goal,
-			Context: r.cfg.Context,
-			Tier:    "", // routing tier: filled by onegw combo
-			Frame:   "", // default: LOOP
-		})
-	}
-	// --- M4: resume from checkpoint if present ---
-	if r.checkpointStore != nil {
-		r.prepareResume()
-		for _, sr := range r.restoredSteps {
-			result.Steps = append(result.Steps, sr)
+	var result RunResult
+	if fresh {
+		result = RunResult{
+			RunID:            r.cfg.RunID,
+			State:            StateThinking,
+			Steps:            []StepRecord{},
+			SpendUSD:         0,
+			CurrentTier:      r.tierForStep(0, r.cfg),
+			PartialSynthesis: "",
 		}
+		// --- M3: build the plan once before the first step ---
+		if r.planner != nil {
+			r.plan = r.planner.Plan(planner.PlannerConfig{
+				Goal:    r.cfg.Goal,
+				Context: r.cfg.Context,
+				Tier:    "", // routing tier: filled by onegw combo
+				Frame:   "", // default: LOOP
+			})
+		}
+		// --- M4: resume from checkpoint if present ---
+		if r.checkpointStore != nil {
+			r.prepareResume()
+			for _, sr := range r.restoredSteps {
+				result.Steps = append(result.Steps, sr)
+			}
+		}
+	} else {
+		// Resume: pick up exactly where the approval
+		// hold stopped. The held step is re-checked
+		// against the gate; an approved request runs.
+		result = r.lastResult
+		result.State = StateActing
 	}
 
 	// --- M2: start root span for the run ---
 	r.tracer.StartSpan(r.cfg.RunID, r.cfg.RunID, "", tracer.SpanSystem, "run", 0)
 
-	for step := r.startStep; step < r.cfg.MaxSteps; step++ {
+	return r.runLoop(ctx, result)
+}
+
+// runLoop is the bounded ReAct loop body, shared by Run and
+// Resume. It starts at r.startStep (fresh) or r.pausedStep
+// (resume) and exits on the first ceiling, approval hold, or
+// the step budget. Every exit ends the root span.
+func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, error) {
+	startStep := r.startStep
+	if r.pausedStep >= 0 {
+		startStep = r.pausedStep
+	}
+	for step := startStep; step < r.cfg.MaxSteps; step++ {
 		// --- P75 kill switch: check at every iteration boundary ---
 		select {
 		case <-r.killCh:
@@ -360,8 +403,13 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 			}
 			dec := r.gate.Check(req)
 			if !dec.ShouldRun() {
+				// Hold the step. Resume() rewinds here and
+				// re-checks the gate; an approved request
+				// continues the loop.
 				result.State = StatePausedApproval
 				result.PartialSynthesis = synthesizePartial(result.Steps)
+				r.pausedStep = step
+				r.lastResult = result
 				r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("approval required: %s", dec.Reason))
 				return result, nil
 			}
@@ -420,6 +468,8 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 			if action == "review" {
 				result.State = StatePausedApproval
 				result.PartialSynthesis = synthesizePartial(result.Steps)
+				r.pausedStep = step
+				r.lastResult = result
 				r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("guardrail: review required"))
 				return result, nil
 			}
@@ -492,10 +542,13 @@ func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
 	}
 
 	// Loop exhausted without resolve = max_steps exit.
+	// The run is no longer paused: a second Resume() is a no-op.
+	r.pausedStep = -1
 	result.State = StateExhausted
 	result.ExitReason = ExitMaxSteps
 	result.Success = ptr(false)
 	result.PartialSynthesis = synthesizePartial(result.Steps)
+	r.lastResult = result
 	r.endRunSpan(r.cfg.RunID, result, nil)
 	return result, nil
 }

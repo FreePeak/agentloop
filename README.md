@@ -6,9 +6,8 @@ goal + budget in, answer / handoff / escalation out.
 
 **Status:** draft for review · **Version:** 1.1.5 · **Date:** 2026-09-19
 
-**The whole PRD lives in [`docs/PRD.md`](docs/PRD.md) (23 numbered sections + 4 appendices).** This file exists because
-`docs/PRD.md` is a subdirectory of the worktree and a top-level landing page
-makes the doc findable. Every substantive statement is in `docs/PRD.md`; the section anchors below point directly at it.
+**The whole PRD lives in [`docs/PRD.md`](docs/PRD.md) (23 numbered sections + 4 appendices).** This README is the landing page;
+`docs/PRD.md` is the canonical statement of scope.
 
 | What | Where |
 |---|---|
@@ -33,12 +32,13 @@ curl -sS -X POST localhost:8081/v1/runs -H 'Content-Type: application/json' \
 curl -sS localhost:8081/v1/runs/<run_id>       # => "paused_approval"
 ```
 
-That pause is the gate working: the five built-in tool names are all
-approve-category (fail-closed), so a run holds on its first step. Note that
-approving today records the decision in the ledger but does not resume the run —
-there is no resume path yet, so the run stays `paused_approval`. Full
-walkthrough — API, states, exit reasons, tiers, approvals, and an honest list of
-what is still stubbed — in [`docs/USAGE.md`](docs/USAGE.md).
+That pause is the gate working: the v1 tool set is read-only (`repo_search`,
+`repo_context`, `web_search`, `run_tests`) plus `write_file` (CatConfirm), so a
+run that never asks for a delete/send/deploy never holds. Approving a held step
+**resumes the run** — the resume path is wired (M5), so the run continues past
+the approved step instead of staying `paused_approval`. Full walkthrough — API,
+states, exit reasons, tiers, approvals, and an honest list of what is still
+stubbed — in [`docs/USAGE.md`](docs/USAGE.md).
 
 ---
 
@@ -84,10 +84,9 @@ trip (`--selftest`).
 
 ## Repo & branch
 
-This is a **worktree**, not a standalone repo — the parent `agentloop/` is the
-git checkout. Commits live on branch `docs/prd-agentloop-service`. The main
-checkout at `/Users/linh.doan/work/harvey/freepeak/agentloop` keeps one untracked
-file (`design.md`); the worktree stays clean.
+This is a normal git checkout (no worktree) on branch `main` at the
+parent `agentloop/` directory. Active feature branches live in
+`.worktrees/` (e.g. `.worktrees/m5-hitl`); stale ones were removed.
 
 ## Ten review loops — the record
 
