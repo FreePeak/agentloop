@@ -159,6 +159,12 @@ type LoopRunner struct {
 	// a DIFFERENT tool, which would run something the operator never saw,
 	// under an approval for something else. Cost is the smaller reason.
 	heldChoice *StepChoice
+	// onProgress, when set, receives a copy of the partial result at every
+	// step boundary. It exists because the result reaches the caller only
+	// at the END of the loop: without it a run in flight is invisible to
+	// everyone outside it, so a poll 404s and the P75 kill is unreachable
+	// for the whole run.
+	onProgress func(RunResult)
 	lastResult RunResult // partial result at pause (M5 resume)
 }
 
@@ -349,9 +355,35 @@ func (r *LoopRunner) Kill() {
 	}
 }
 
+// WithProgress returns the runner with fn called at every step boundary
+// (and once before the first step), handing the live partial result to
+// whoever is watching the run. Without it a run in flight has no result
+// to read: the store is empty until the loop returns, so a poll 404s and
+// a kill has nothing to stamp.
+func (r *LoopRunner) WithProgress(fn func(RunResult)) *LoopRunner {
+	r.onProgress = fn
+	return r
+}
+
+// reportProgress hands the current result to the progress sink, if one is
+// set. Steps is copied so a later append in the loop cannot race a reader
+// that is already encoding the snapshot.
+func (r *LoopRunner) reportProgress(result RunResult) {
+	if r.onProgress == nil {
+		return
+	}
+	snapshot := result
+	snapshot.Steps = append([]StepRecord(nil), result.Steps...)
+	r.onProgress(snapshot)
+}
+
 // Run executes the bounded loop and returns the RunResult.
 func (r *LoopRunner) Run(ctx context.Context) (RunResult, error) {
-	return r.runWith(ctx, true)
+	result, err := r.runWith(ctx, true)
+	// One last publish after the loop ends, so a watcher's final view is
+	// the finished result and not the second-to-last step boundary.
+	r.reportProgress(result)
+	return result, err
 }
 
 // Resume re-enters a run that paused for operator approval
@@ -364,7 +396,9 @@ func (r *LoopRunner) Resume(ctx context.Context) (RunResult, error) {
 	if r.pausedStep < 0 {
 		return r.lastResult, nil
 	}
-	return r.runWith(ctx, false)
+	result, err := r.runWith(ctx, false)
+	r.reportProgress(result)
+	return result, err
 }
 
 // runWith builds the run state and delegates the loop to
@@ -421,7 +455,18 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 	if r.pausedStep >= 0 {
 		startStep = r.pausedStep
 	}
+	// Publish the partial before the first ceiling check. A run in flight
+	// must be readable: the server stores the result only when the loop
+	// returns, so without this a poll 404s and a kill has no state to
+	// stamp for the whole run (the documented "submit, then poll" flow,
+	// and the P75 kill switch).
+	r.reportProgress(result)
+	defer r.reportProgress(result)
 	for step := startStep; step < r.cfg.MaxSteps; step++ {
+		// Publish at every step boundary, so a watcher sees the step that
+		// just ran rather than a view lagging a step behind. The deferred
+		// report fires last, so the final publish is the finished result.
+		r.reportProgress(result)
 		// --- P75 kill switch: check at every iteration boundary ---
 		select {
 		case <-r.killCh:
