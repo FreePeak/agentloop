@@ -106,6 +106,11 @@ Deployment facts, not compiled defaults:
 | `AGENTLOOP_XDEV_BIN` | `xdev` | the sandbox binary; agentloop speaks its `rpc` JSONL protocol |
 | `AGENTLOOP_XDEV_DIR` | a fresh temp dir | the workspace `write_file`/`run_tests` turns run in |
 | `AGENTLOOP_XDEV_OFF` | *(unset)* | any value disables the sandbox; those two tools then report no executor |
+| `AGENTLOOP_SYSTEMONE_URL` | *(empty → screening off)* | the evaluation endpoint root. Point it at onegw (`http://127.0.0.1:8080`) and onegw owns which backend answers; point it at `https://api.typesafe.ai` (Jev) or a Laya sidecar on `http://127.0.0.1:8091` and the same client screens directly |
+| `AGENTLOOP_SYSTEMONE_KEY` | *(empty)* | bearer key for the screen; empty sends no `Authorization` header (what onegw and a local sidecar want) |
+| `AGENTLOOP_SYSTEMONE_MODEL` | `jev-latest` | evaluation model — a Laya alias when the URL points at a sidecar |
+| `AGENTLOOP_SYSTEMONE_OFF` | *(unset)* | any value disables screening even when a URL is set |
+| `AGENTLOOP_GUARDRAIL_POLICY` | `strict` | `strict` (review≥0.35, action≥0.70, severity≥2.0 block) or `permissive` (action≥0.85); anything unrecognised is **strict**, because a typo must not loosen a screen |
 | `AGENTLOOP_ONEGW_URL` | `http://127.0.0.1:8080` | gateway; when reachable, the model **chooses each step** |
 | `AGENTLOOP_ONEGW_COMBO` | `dev` | combo used as the wire `model` for both step choice and synthesis |
 

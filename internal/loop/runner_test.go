@@ -191,15 +191,16 @@ func TestCase5_InjectionSafe(t *testing.T) {
 // is reachable and listed — no silent exit paths.
 func TestAllExitReasonsListed(t *testing.T) {
 	got := loop.AllExitReasons()
-	if len(got) != 9 {
-		t.Fatalf("AllExitReasons() returned %d items, want 9", len(got))
+	if len(got) != 10 {
+		t.Fatalf("AllExitReasons() returned %d items, want 10", len(got))
 	}
 	expected := map[string]bool{
 		"max_steps": false, "wall_clock": false, "cost_budget": false,
 		"daily_budget": false, "confidence_floor": false,
 		"progress_stall": false, "consecutive_failures": false,
-		"goal_met":        false,
-		"guardrail_block": false,
+		"goal_met":              false,
+		"guardrail_block":       false,
+		"guardrail_unavailable": false,
 	}
 	for _, r := range got {
 		if _, ok := expected[r.String()]; !ok {

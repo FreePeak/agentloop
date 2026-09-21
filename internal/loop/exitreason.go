@@ -16,6 +16,13 @@ const (
 	ExitProgressStall       ExitReason = "progress_stall"
 	ExitConsecutiveFailures ExitReason = "consecutive_failures"
 	ExitGuardrailBlock      ExitReason = "guardrail_block" // M2.x: TypeSafe screen blocked
+	// ExitGuardrailUnavailable is the screen failing closed (M2.x,
+	// PRD §4.3): the battery could not be evaluated, so nothing may act
+	// on the unscreened content. It is a distinct exit from a block()
+	// on purpose — "the screen said no" and "there was no screen" are
+	// different incidents, and collapsing them would hide an outage as
+	// a policy hit.
+	ExitGuardrailUnavailable ExitReason = "guardrail_unavailable"
 	// ExitGoalMet is the goal predicate firing, which is not a bound: the
 	// run stopped because it was done. It is the one exit a reasoner can
 	// reach on its own, and it is distinct from max_steps on purpose
@@ -29,7 +36,7 @@ func AllExitReasons() []ExitReason {
 	return []ExitReason{
 		ExitMaxSteps, ExitWallClock, ExitCostBudget, ExitDailyBudget,
 		ExitConfidenceFloor, ExitProgressStall, ExitConsecutiveFailures,
-		ExitGuardrailBlock, ExitGoalMet,
+		ExitGuardrailBlock, ExitGuardrailUnavailable, ExitGoalMet,
 	}
 }
 

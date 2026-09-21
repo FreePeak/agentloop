@@ -79,6 +79,11 @@ type RunResult struct {
 	ReasonErrors   []string `json:"reason_errors,omitempty"`
 	AnsweredBy     string   `json:"answered_by,omitempty"`
 	SynthesisError string   `json:"synthesis_error,omitempty"`
+	// ScreenError is why the guardrail screen could not be evaluated
+	// when it failed closed (exit_reason=guardrail_unavailable). An
+	// outage and a policy block are different incidents and must not
+	// be reported as the same one.
+	ScreenError string `json:"screen_error,omitempty"`
 }
 
 // RunnerConfig holds the tunables for a single run.
@@ -91,9 +96,17 @@ type RunnerConfig struct {
 	Context             string
 	ConfidenceFloor     float64
 	EscalationThreshold float64
-	Gate                *ApprovalGate // M5: fail-closed HITL gate (nil = bypass, tests)
-	SandboxDir          string        // workspace a sandboxed turn runs in (empty = tool's own default)
-	Model               ModelClient   // M8: outbound model transport (nil = deterministic synthesis only)
+	Gate                *ApprovalGate   // M5: fail-closed HITL gate (nil = bypass, tests)
+	SandboxDir          string          // workspace a sandboxed turn runs in (empty = tool's own default)
+	Model               ModelClient     // M8: outbound model transport (nil = deterministic synthesis only)
+	Guardrail           GuardrailClient // M2.x: System One screen (nil = screening off)
+	// Policy is the guardrail threshold set. The zero value is the
+	// measured strict default (PRD §17), so a deploy that never sets it
+	// screens strictly; Permissive is the operator-selectable
+	// alternative (a jailbreak dressed as a medical accommodation
+	// scores block under strict and review under permissive — measured
+	// 2026-09-19, §7.2).
+	Policy experiments.Policy
 }
 
 // LoopRunner runs one bounded agent loop. Ceilings are enforced
@@ -122,7 +135,8 @@ type LoopRunner struct {
 	plan                *planner.Plan                                   // current plan (M3)
 	gate                *ApprovalGate                                   // M5: fail-closed HITL gate (nil = bypass, tests)
 	model               ModelClient                                     // M8: outbound model transport (nil = deterministic synthesis)
-	guardrailScreen     func(string, any) (map[string]float64, float64) // M2.x: TypeSafe screen
+	guardrail           GuardrailClient                                 // M2.x: live System One screen (nil = screening off)
+	guardrailScreen     func(string, any) (map[string]float64, float64) // M2.x: injected screen (tests)
 	pausedStep          int                                             // step held at paused_approval (M5)
 	// heldChoice is the decision already made for the held step. Resume
 	// replays it rather than re-asking the model: a second call can choose
@@ -142,6 +156,21 @@ func NewRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry) *L
 func NewRunnerWithToolFn(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	toolPick func(int, RunnerConfig) (string, map[string]any)) *LoopRunner {
 	return newRunner(cfg, guard, reg, toolPick, nil, nil, nil, nil, nil)
+}
+
+// GuardrailClient is the System One evaluation surface the loop screens
+// with: one state in, a Noul hazard map plus the severity Score out.
+//
+// Both halves come back from one call on purpose. The screen is one
+// request either way, and a caller that had to fetch the severity
+// separately would either double the cost or invent a default for it —
+// and a defaulted severity silently turns every review into a pass.
+//
+// internal/systemone.Client satisfies it; tests use fakes. Same rule as
+// ModelClient: the loop consumes the transport, it never becomes one
+// (no retry ladder, no key pool, no backend switch).
+type GuardrailClient interface {
+	Screen(ctx context.Context, state any) (map[string]float64, float64, error)
 }
 
 // NewRunnerWithTracer returns a LoopRunner with a custom tool picker
@@ -228,6 +257,9 @@ func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	if cfg.EscalationThreshold == 0 {
 		cfg.EscalationThreshold = EscalationThreshold
 	}
+	if cfg.Policy == (experiments.Policy{}) {
+		cfg.Policy = experiments.Strict
+	}
 	if t == nil {
 		t = tracer.New()
 	}
@@ -244,6 +276,7 @@ func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 		checkpointStore: cps,
 		gate:            gate,
 		model:           cfg.Model,
+		guardrail:       cfg.Guardrail,
 		pausedStep:      -1,
 		lastResult:      RunResult{},
 	}
@@ -251,6 +284,14 @@ func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 
 // Kill closes the kill channel — the loop checks it at every
 // iteration boundary and exits state=killed within one step.
+func (r *LoopRunner) Kill() {
+	select {
+	case <-r.killCh:
+	default:
+		close(r.killCh)
+	}
+}
+
 func (r *LoopRunner) tierForStep(step int, cfg RunnerConfig) string {
 	if r.plan != nil && step < len(r.plan.Steps) {
 		return r.plan.Steps[step].Tier
@@ -266,14 +307,6 @@ func tierCombo(tier string) string {
 		return "execution"
 	default:
 		return "tiny"
-	}
-}
-
-func (r *LoopRunner) Kill() {
-	select {
-	case <-r.killCh:
-	default:
-		close(r.killCh)
 	}
 }
 
@@ -547,34 +580,62 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 		// --- M2: validate result (2K token cap) ---
 		tr = validateResult(tr)
 
-		// --- M2.x: TypeSafe guardrail screen ---
-		if r.guardrailScreen != nil {
-			nouls, sev := r.guardrailScreen(toolName, tr.Data)
-			action := experiments.Route(nouls, sev, experiments.Strict)
-			if action == "review" {
-				result.State = StatePausedApproval
+		// --- M2.x: System One guardrail screen ---
+		//
+		// The screen runs on the tool result before it can reach the
+		// model, and it fails closed: a battery that could not be
+		// evaluated is not a pass. Recording the verdict on the step is
+		// what makes a blocked run auditable — "why did it stop" has to
+		// be answerable from the trajectory (PRD §7.2, §4.3).
+		var screens []ScreenResult
+		if r.screening() {
+			nouls, sev, serr := r.screen(ctx, toolName, tr.Data)
+			if serr != nil {
+				result.State = StateExhausted
+				result.ExitReason = ExitGuardrailUnavailable
+				result.Success = ptr(false)
+				result.ScreenError = serr.Error()
 				_ = r.synthesize(ctx, &result)
-				r.pausedStep = step
-				r.heldChoice = held
-				r.lastResult = result
-				r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("guardrail: review required"))
+				r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("guardrail unavailable: %w", serr))
 				return result, nil
 			}
-			if action == "block" {
+			hazard, prob := topHazard(nouls)
+			action := experiments.Route(nouls, sev, r.cfg.Policy)
+			screens = screenRows(hazard, prob, sev, action)
+
+			if action == "review" || action == "block" {
+				// The screened content never reaches the model, so this
+				// step is the only record of what the screen saw: without
+				// it a blocked run is an exit reason with no evidence
+				// attached (PRD §7.2 — the trajectory must answer "what
+				// was it blocked on?").
+				result.Steps = append(result.Steps, StepRecord{
+					StepID:    step,
+					Phase:     "act",
+					Tool:      toolName,
+					ArgsHash:  argsHash,
+					Args:      args,
+					Why:       why,
+					Result:    tr.Data,
+					CostUSD:   0.001,
+					LatencyMs: latency,
+					Screens:   screens,
+				})
+				if action == "review" {
+					result.State = StatePausedApproval
+					_ = r.synthesize(ctx, &result)
+					r.pausedStep = step
+					r.heldChoice = held
+					r.lastResult = result
+					r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("guardrail: review required"))
+					return result, nil
+				}
 				result.State = StateExhausted
 				result.ExitReason = ExitGuardrailBlock
 				result.Success = ptr(false)
 				_ = r.synthesize(ctx, &result)
 				r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("guardrail: blocked"))
 				return result, nil
-			}
-			// Record non-block screen result on the step (ponytail: ceiling — only pass/review/block recorded; upgrade path: store full Noul battery payload).
-			if len(result.Steps) > 0 {
-				result.Steps[len(result.Steps)-1].Screens = append(result.Steps[len(result.Steps)-1].Screens, ScreenResult{
-					Hazard: "noul_battery",
-					Prob:   sev,
-					Action: action,
-				})
 			}
 		}
 
@@ -593,6 +654,7 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 				Result:    map[string]any{"error": stepError(err, tr), "message": tr.Message},
 				CostUSD:   0.001,
 				LatencyMs: latency,
+				Screens:   screens,
 			})
 			r.tracer.EndSpan(spanID, tr, err, 0.001)
 			r.rememberStep(step, toolName, tr.Message, true)
@@ -616,6 +678,7 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 			CostUSD:    0.001,
 			LatencyMs:  latency,
 			Confidence: stepConf,
+			Screens:    screens,
 		})
 		r.tracer.EndSpan(spanID, tr, nil, 0.001)
 		r.rememberStep(step, toolName, tr.Data, false)

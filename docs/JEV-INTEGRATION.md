@@ -1,6 +1,6 @@
 # System One — Jev / Laya integration for agentloop
 
-**Status:** onegw `KindSystemOne` merged · combo routing open (PR #110) · Laya local path proposed  
+**Status:** agentloop client shipped (`internal/systemone`, `Screen()` on the loop) · onegw `KindSystemOne` merged · combo routing open (PR #110) · Laya local path proposed  
 **Date:** 2026-09-21  
 **Repo:** `github.com/FreePeak/agentloop`  
 **Canonical product name in this doc:** **System One** (the decision API).  
@@ -100,6 +100,35 @@ Built-in `Router(preload=…)` picks english vs multilingual from script/languag
 
 Putting Laya *inside* agentloop as a Python import would violate the same separation-of-powers table as calling TypeSafe from agentloop (PRD §4.3, duplication audit).
 
+### 2.1 Where the client lives, and why (decided 2026-09-21)
+
+The question "should agentloop own the Jev/Laya provider, or onegw?" resolves
+into two different questions that the separation-of-powers table keeps apart:
+
+| Question | Answer | Why |
+|---|---|---|
+| Who owns *policy* — when to screen, thresholds, pass/review/block, what a fail-closed screen exits with? | **agentloop** | It is the thing being constrained (PRD §4.3). A gateway deciding whether content is harmful is a control the controlled component can relax. |
+| Who owns *which backend answers* — Jev vs Laya, combo order, fallback, key pools, usage accounting? | **onegw** | Onegw already owns routing/fallback/metering; duplicating it in agentloop is the duplication the audit exists to prevent. |
+| Who owns *the wire* — one POST of `{state, model, questions}` and the answer shape? | **agentloop has its own client** (`internal/systemone`) | Not an abstraction layer over backends: it is the same class of thin client as `internal/onegw` and `internal/leankg` — one POST, no retry ladder, no key pool, no backend switch. The "backend choice" is a URL. |
+
+That last row is the answer to "why not implement Jev/Laya here": **it is
+implemented here** — as transport for evaluation, which is a different wire
+surface from generation. `internal/onegw.Client` speaks
+`POST /v1/chat/completions`; `internal/systemone.Client` speaks
+`POST /v1/systemone`. Both are dumb clients over a URL that defaults to the
+gateway. Pointing that URL at onegw keeps §4.3 exactly as written; pointing it
+at TypeSafe or a Laya sidecar is an explicit operator choice, not an
+architecture change.
+
+The reason a **generation abstraction** (an LLM provider interface with Jev and
+Laya implementations) is *not* built here is different, and stronger: Jev and
+Laya are not generation models. Laya is a non-autoregressive encoder
+(ModernBERT/mmBERT) that answers Choice/Score/Noul questions — it cannot hold a
+conversation, so it cannot satisfy a generation-provider interface, and one that
+it could satisfy would be a fiction agentloop would then route prose through.
+The interface that fits both is the *decision* wire, which is what
+`internal/systemone` implements.
+
 ---
 
 ## 3. Abstraction design — one contract, two backends
@@ -184,7 +213,19 @@ Already implemented:
 - `Strict` / `Permissive` policies (PRD §17)
 - Shell harnesses: `typesafe_experiments.sh`, `typesafe_benchmark.sh`, `analyze_experiments.sh`
 
-Still to wire (issue #8 checklist): call site at step boundary, BudgetGuard line item, eval case 6 in CI.
+**Shipped 2026-09-21 (`internal/systemone`):** the evaluation transport —
+`Evaluate(ctx, state, battery)` for any battery, `Screen(ctx, state)` for the
+guardrail battery (`DefaultBattery()`, the same five questions
+`typesafe_experiments.sh` sends, so Go and shell score the same corpus). Wired
+into the loop at the step boundary: `RunnerConfig.Guardrail` +
+`RunnerConfig.Policy`, env `AGENTLOOP_SYSTEMONE_URL` / `AGENTLOOP_SYSTEMONE_KEY`
+/ `AGENTLOOP_SYSTEMONE_MODEL` / `AGENTLOOP_GUARDRAIL_POLICY`. Screening is off
+until a URL is set — off is not "pass", it records no verdicts, so an operator
+can tell an unscreened deploy from a clean one.
+
+Still to wire (issue #8 checklist): BudgetGuard line item for the measured
+~740 ms/~665 tokens per screen, input-screen call site (the pre-model goal, not
+just the post-tool result), eval case 6 in CI.
 
 ### 3.4 Status of the Jev path (onegw)
 
@@ -196,6 +237,7 @@ Still to wire (issue #8 checklist): call site at step boundary, BudgetGuard line
 | Verdict-driven combo reorder (PR #110 / commit `9390e2b`) | ❌ open — [#21](https://github.com/FreePeak/agentloop/issues/21) |
 | TypeSafe API shape verified from docs | ✅ this revision (Bearer, `/v1/systemone`, state+model+questions) |
 | Laya local provider / sidecar | ❌ proposed — this doc |
+| agentloop client `internal/systemone` + step-boundary screen | ✅ 2026-09-21 (Jev-shaped and Laya-shaped envelopes both covered by `systemone_test.go`) |
 
 ---
 
@@ -352,13 +394,13 @@ MPS available on Apple Silicon torch wheels; warm English ~70 ms was fine on def
 | 5 | Shared contract doc (this file) covers Jev + Laya | ✅ |
 | 6 | Laya installed + smoke predict on maintainer Mac | ✅ 2026-09-21 |
 | 7 | Laya sidecar `/v1/systemone` shape-compatible | ❌ not built |
-| 8 | agentloop phase-boundary screen live | ❌ issue #8 |
-| 9 | Side-by-side Jev vs Laya on guard corpus | ❌ |
+| 8 | agentloop phase-boundary screen live (tool result → `/v1/systemone` → `Route()`) | ✅ 2026-09-21 · **input** (pre-model goal) screen still issue #8 |
+| 9 | Side-by-side Jev vs Laya on guard corpus (same client, two URLs) | ❌ needs an API key and the sidecar |
 | 10 | xdev models.yml systemone selector (if needed) | ⬜ optional |
 
 ### Done means
 
-- Agentloop code paths speak **only** `POST /v1/systemone` with batteries from config.
+- Agentloop code paths speak **only** `POST /v1/systemone` with batteries from config — true for the tool-result screen; the input screen is the remaining call site.
 - Onegw can answer that call via **Jev and/or Laya** without agentloop changes.
 - UC-1 guardrails ship with measured thresholds; UC-2/3 behind flags until calibrated.
 

@@ -18,13 +18,22 @@ import (
 
 	"github.com/FreePeak/agentloop/internal/budget"
 	"github.com/FreePeak/agentloop/internal/eval"
+	"github.com/FreePeak/agentloop/internal/experiments"
 	"github.com/FreePeak/agentloop/internal/leankg"
 	"github.com/FreePeak/agentloop/internal/loop"
 	"github.com/FreePeak/agentloop/internal/onegw"
 	"github.com/FreePeak/agentloop/internal/planner"
+	"github.com/FreePeak/agentloop/internal/systemone"
 	"github.com/FreePeak/agentloop/internal/tools"
 	"github.com/FreePeak/agentloop/internal/xdev"
 )
+
+// GuardrailClient is the loop's screening surface, redeclared here so the
+// server can hold one without importing the loop package's runner types.
+// internal/systemone.Client satisfies both this and loop.GuardrailClient.
+type GuardrailClient interface {
+	Screen(ctx context.Context, state any) (map[string]float64, float64, error)
+}
 
 // Server holds the in-memory run store, the runner/gate registry,
 // the tool registry, the M6 eval runner that gates deploys, and the
@@ -37,6 +46,10 @@ type Server struct {
 	tools      tools.ToolRegistry
 	evalRunner *eval.Runner
 	model      *onegw.Client
+	// screen is the System One guardrail transport (nil = screening off).
+	// One client shared by every run: it holds an HTTP connection pool,
+	// not per-run state.
+	screen GuardrailClient
 	// sandboxDir is the workspace sandboxed turns run in; empty when no
 	// executor is configured.
 	sandboxDir string
@@ -73,6 +86,7 @@ func NewServer() *Server {
 			os.Getenv("AGENTLOOP_ONEGW_KEY"),
 			envOr("AGENTLOOP_ONEGW_COMBO", "dev"),
 		),
+		screen: systemoneFromEnv(),
 		evalRunner: eval.NewRunner(func(cfg loop.RunnerConfig) (*loop.LoopRunner, *budget.Guard, tools.ToolRegistry, error) {
 			// Same runner the service builds, minus the model: the gate and
 			// the planner are part of what the cases exercise, so building a
@@ -110,6 +124,45 @@ func leankgFromEnv() *leankg.Client {
 		return nil
 	}
 	return leankg.New(envOr("AGENTLOOP_LEANKG_URL", "http://127.0.0.1:8090"))
+}
+
+// systemoneFromEnv wires the System One guardrail transport from the
+// environment.
+//
+//	AGENTLOOP_SYSTEMONE_URL    endpoint root; empty disables screening
+//	                           (default when set: onegw's root)
+//	AGENTLOOP_SYSTEMONE_KEY    bearer key; empty sends no Authorization
+//	                           header (what onegw and a local sidecar want)
+//	AGENTLOOP_SYSTEMONE_MODEL  evaluation model, default jev-latest
+//
+// The URL is the whole backend choice, which is the point (PRD §4.3): point
+// it at onegw (http://127.0.0.1:8080) and it owns the combo, the fallback
+// chain and usage accounting; point it straight at a backend
+// (https://api.typesafe.ai for Jev, http://127.0.0.1:8091 for a local Laya
+// sidecar) and the same client screens without any code change.
+//
+// Screening is OFF until a URL is given, and off is not "pass": a run with
+// no screen has no verdicts recorded, so an operator reading a trajectory
+// can tell an unscreened deployment from a clean one. The alternative —
+// defaulting to a URL that is probably down — would turn every run into a
+// fail-closed exit.
+func systemoneFromEnv() GuardrailClient {
+	base := os.Getenv("AGENTLOOP_SYSTEMONE_URL")
+	if base == "" || os.Getenv("AGENTLOOP_SYSTEMONE_OFF") != "" {
+		return nil
+	}
+	return systemone.New(base, os.Getenv("AGENTLOOP_SYSTEMONE_KEY"),
+		os.Getenv("AGENTLOOP_SYSTEMONE_MODEL"))
+}
+
+// policyFromEnv selects the guardrail threshold set (PRD §17): strict is the
+// measured default, permissive the operator-selectable alternative. An
+// unrecognised value is strict — a typo must not silently loosen a screen.
+func policyFromEnv() experiments.Policy {
+	if strings.EqualFold(os.Getenv("AGENTLOOP_GUARDRAIL_POLICY"), "permissive") {
+		return experiments.Permissive
+	}
+	return experiments.Strict
 }
 
 // xdevFromEnv starts ONE sandbox child and returns it, or nil when no
@@ -195,6 +248,11 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) {
 		// The eval runner deliberately gets no model — the deploy gate
 		// must stay deterministic and offline.
 		Model: s.model,
+		// M2.x: every step boundary screens the tool result through
+		// System One. nil (no AGENTLOOP_SYSTEMONE_URL) leaves the loop
+		// unscreened rather than pretending a missing screen passed.
+		Guardrail: s.screen,
+		Policy:    policyFromEnv(),
 	}
 	runner := loop.NewRunnerWithPlannerAndGate(cfg, guard, s.tools, planner.NewPlanner(), gate)
 	s.mu.Lock()
