@@ -42,11 +42,13 @@ Read this before you plan work around it. As of this writing:
 | M7 multi-agent (`internal/supervisor`) | **gated shut** by design — refused unless one of [PRD §10](PRD.md#10-multi-agent-stance)'s four conditions is met |
 
 **What this means:** a run today exercises the real loop, budget, gate, and
-observability machinery end to end — it stops on its own bounds and it holds
-only on a write — but it does no real work, because the tools return empty
-results. It is a harness you can develop against, not yet an agent that fixes
-your code. The honest next steps are listed at the end.
-your code. The honest next steps are listed at the end.
+observability machinery end to end, and it **reads**: `query` returns real hits
+from the code graph, and synthesis returns a model-written partial when a
+gateway is reachable. What it does not yet do is **write or verify** —
+`write_file` holds for a human and writes nothing, `run_tests` runs nothing, and
+the planner picks steps from a rule table rather than a model. It is a harness
+you can develop against, not yet an agent that fixes your code. The honest next
+steps are listed at the end.
 
 ---
 
