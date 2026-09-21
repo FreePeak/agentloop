@@ -123,8 +123,14 @@ func TestM3_PlannerDrivenRun(t *testing.T) {
 	if len(result.Steps) == 0 {
 		t.Fatal("run has no steps")
 	}
-	// Tier should be set from the plan (planning or tiny default)
-	if result.CurrentTier != "planning" && result.CurrentTier != "tiny" {
-		t.Errorf("CurrentTier = %q, want planning or tiny", result.CurrentTier)
+	// The run reports a routing tier, and it is one of the three the loop
+	// actually routes on. The old assertion named `tiny`, a combo that
+	// does not exist in onegw and was therefore a tier nothing could route
+	// to — the exact drift this test now prevents.
+	switch result.CurrentTier {
+	case TierPlanning, TierExecution, TierSynthesis:
+	default:
+		t.Errorf("CurrentTier = %q, want one of %s/%s/%s",
+			result.CurrentTier, TierPlanning, TierExecution, TierSynthesis)
 	}
 }
