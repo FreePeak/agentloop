@@ -23,6 +23,7 @@ import (
 	"github.com/FreePeak/agentloop/internal/onegw"
 	"github.com/FreePeak/agentloop/internal/planner"
 	"github.com/FreePeak/agentloop/internal/tools"
+	"github.com/FreePeak/agentloop/internal/xdev"
 )
 
 // Server holds the in-memory run store, the runner/gate registry,
@@ -36,6 +37,9 @@ type Server struct {
 	tools      tools.ToolRegistry
 	evalRunner *eval.Runner
 	model      *onegw.Client
+	// sandboxDir is the workspace sandboxed turns run in; empty when no
+	// executor is configured.
+	sandboxDir string
 }
 
 // NewServer creates a Server with the v1 tool set and empty stores.
@@ -56,12 +60,14 @@ type Server struct {
 // and no model: the M6 deploy gate must stay deterministic and offline, so it
 // must not depend on LeanKG or onegw being up (PRD §11.4).
 func NewServer() *Server {
-	reg := tools.NewRegistryWithKnowledge(leankgFromEnv())
+	sandboxDir := os.Getenv("AGENTLOOP_XDEV_DIR")
+	reg := tools.NewRegistryWithKnowledge(leankgFromEnv()).WithSandbox(xdevFromEnv(context.Background(), sandboxDir), sandboxDir)
 	return &Server{
-		runs:    make(map[string]loop.RunResult),
-		runners: make(map[string]*loop.LoopRunner),
-		gates:   make(map[string]*loop.ApprovalGate),
-		tools:   reg,
+		runs:       make(map[string]loop.RunResult),
+		runners:    make(map[string]*loop.LoopRunner),
+		gates:      make(map[string]*loop.ApprovalGate),
+		tools:      reg,
+		sandboxDir: sandboxDir,
 		model: onegw.New(
 			envOr("AGENTLOOP_ONEGW_URL", "http://127.0.0.1:8080"),
 			os.Getenv("AGENTLOOP_ONEGW_KEY"),
@@ -73,6 +79,9 @@ func NewServer() *Server {
 			// bare runner here made the adversarial case unscoreable — no
 			// gate means no pause, and a pause is its whole premise.
 			g := budget.New(cfg.CostBudget, float64(loop.DailyCeilingMult)*cfg.CostBudget)
+			// No sandbox and no knowledge client: the M6 deploy gate must
+			// stay deterministic and offline (PRD §11.4), so it must not
+			// depend on xdev or LeanKG being up.
 			reg := tools.NewRegistry()
 			gate := loop.NewApprovalGate()
 			cfg.Gate = gate
@@ -101,6 +110,48 @@ func leankgFromEnv() *leankg.Client {
 		return nil
 	}
 	return leankg.New(envOr("AGENTLOOP_LEANKG_URL", "http://127.0.0.1:8090"))
+}
+
+// xdevFromEnv starts ONE sandbox child and returns it, or nil when no
+// executor is wanted.
+//
+//	AGENTLOOP_XDEV_BIN   default "xdev"
+//	AGENTLOOP_XDEV_DIR   the workspace turns run in; default is a fresh
+//	                     temp dir, because a sandbox pointed at the
+//	                     server's own cwd can edit agentloop itself
+//	AGENTLOOP_XDEV_OFF   any value disables it
+//
+// One child is shared by every run on purpose: `xdev rpc` keeps a session
+// and a model conversation, so a per-run child would pay startup on every
+// step and lose the thread between them. It is still one turn at a time —
+// the client serialises prompts.
+//
+// A child that will not start is not fatal: the registry is built without
+// a sandbox and `run_tests`/`write_file` report that no executor is
+// configured. That is the same shape as LeanKG being down, and it keeps a
+// deploy without xdev able to run the read-only paths.
+func xdevFromEnv(ctx context.Context, dir string) *xdev.Client {
+	if os.Getenv("AGENTLOOP_XDEV_OFF") != "" {
+		return nil
+	}
+	if dir == "" {
+		d, err := os.MkdirTemp("", "agentloop-sandbox-")
+		if err != nil {
+			log.Printf("sandbox: no workspace: %v", err)
+			return nil
+		}
+		dir = d
+	}
+	c, err := xdev.Start(ctx, xdev.Config{
+		Command: envOr("AGENTLOOP_XDEV_BIN", "xdev"),
+		Dir:     dir,
+	})
+	if err != nil {
+		log.Printf("sandbox: xdev unavailable, run_tests and write_file will report no executor: %v", err)
+		return nil
+	}
+	log.Printf("sandbox: xdev rpc started in %s", dir)
+	return c
 }
 
 type runRequest struct {
@@ -139,6 +190,7 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) {
 		Goal:       body.Goal,
 		Context:    body.Context,
 		Gate:       gate,
+		SandboxDir: s.sandboxDir,
 		// M8: the loop can call the portfolio's gateway for synthesis.
 		// The eval runner deliberately gets no model — the deploy gate
 		// must stay deterministic and offline.

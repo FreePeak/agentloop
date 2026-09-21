@@ -77,6 +77,7 @@ type RunnerConfig struct {
 	ConfidenceFloor     float64
 	EscalationThreshold float64
 	Gate                *ApprovalGate // M5: fail-closed HITL gate (nil = bypass, tests)
+	SandboxDir          string        // workspace a sandboxed turn runs in (empty = tool's own default)
 	Model               ModelClient   // M8: outbound model transport (nil = deterministic synthesis only)
 }
 
@@ -638,10 +639,34 @@ func synthesizePartial(steps []StepRecord) string {
 // nextToolDefault returns the tool and args for a step. M1 uses a
 // deterministic rotation over the 4 v1 tools for testing;
 // production replaces this with the planner's output.
+// nextToolDefault is the deterministic stand-in for model-driven tool
+// selection (PRD §4.3: "agentloop owns the loop, xdev owns the turn").
+// It rotates the v1 surface and gives each tool the arguments it needs to
+// be a real call rather than a shape:
+//
+//   - the readers get the goal as their query text;
+//   - run_tests gets the workspace to verify;
+//   - write_file gets a target path, because a write with no target now
+//     fails closed — the previous rotation passed only step/goal, so every
+//     write was rejected before the model inside the sandbox ever saw it.
+//
+// ponytail: the path is derived from cfg.RunID, not from what the run
+// learned. A real planner names the file; this exists so the write path is
+// exercisable end to end until that lands.
 func nextToolDefault(step int, cfg RunnerConfig) (string, map[string]any) {
 	tools := []string{"query", "web_search", "run_tests", "write_file"}
 	name := tools[step%len(tools)]
-	return name, map[string]any{"step": step, "goal": cfg.Goal}
+	args := map[string]any{"step": step, "goal": cfg.Goal}
+	switch name {
+	case "run_tests":
+		if cfg.SandboxDir != "" {
+			args["cwd"] = cfg.SandboxDir
+		}
+	case "write_file":
+		args["path"] = fmt.Sprintf("agentloop-%s-step-%d.txt", cfg.RunID, step)
+		args["content"] = fmt.Sprintf("step %d of run %s: %s\n", step, cfg.RunID, cfg.Goal)
+	}
+	return name, args
 }
 
 // dedupKey is the agentloop idempotency fingerprint:

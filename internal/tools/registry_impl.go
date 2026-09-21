@@ -3,17 +3,21 @@
 // registry's Execute routes through AgentBase.execute(tool, args)
 // (PRD §4.3 — agentloop owns the loop, xdev owns the turn).
 //
-// One tool is real today: `query` reaches LeanKG when a knowledge
-// client is injected (cmd/agentloop wires it from the environment).
-// The other three are still stubs, and they say so in their message
-// rather than returning a success the loop cannot tell apart from work.
+// Two of the four are real: `query` reaches LeanKG when a knowledge
+// client is injected, and `run_tests`/`write_file` run as one xdev turn
+// when a sandbox client is injected (cmd/agentloop wires both from the
+// environment). `web_search` has no client yet, and it says so in its
+// message rather than returning a success the loop cannot tell apart
+// from work.
 package tools
 
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/FreePeak/agentloop/internal/leankg"
+	"github.com/FreePeak/agentloop/internal/xdev"
 )
 
 // Registry is an in-memory ToolRegistry pre-loaded with the 4 v1 tools.
@@ -24,6 +28,14 @@ type Registry struct {
 	// instead of answering with an empty hit list, which would read as
 	// "the graph has nothing" (P100 honest degradation).
 	Knowledge *leankg.Client
+	// Sandbox is the xdev client behind `run_tests` and `write_file`. Nil
+	// means no executor is configured, and those two tools say so rather
+	// than reporting success for work nobody did. This is the seam PRD
+	// §4.3 draws: agentloop owns the loop, xdev owns the turn.
+	Sandbox *xdev.Client
+	// SandboxDir is the workspace a turn runs in. Every write and every
+	// test run is confined to it.
+	SandboxDir string
 }
 
 // NewRegistry returns a Registry with the default v1 tool set and no
@@ -36,6 +48,16 @@ func NewRegistry() *Registry {
 // the given LeanKG instance.
 func NewRegistryWithKnowledge(c *leankg.Client) *Registry {
 	return &Registry{Tools: append([]Tool(nil), DefaultTools...), Knowledge: c}
+}
+
+// WithSandbox returns a copy of the Registry whose `run_tests` and
+// `write_file` tools run as xdev turns in dir. Passing a nil client leaves
+// them reporting "no executor configured", which is the honest answer.
+func (r *Registry) WithSandbox(c *xdev.Client, dir string) *Registry {
+	out := *r
+	out.Tools = append([]Tool(nil), r.Tools...)
+	out.Sandbox, out.SandboxDir = c, dir
+	return &out
 }
 
 // List returns the registered tools.
@@ -76,18 +98,9 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 			Message: "stub: web_search results would come from onegw provider kind=searxng",
 		}, nil
 	case "run_tests":
-		return ToolResult{
-			Success: true,
-			Data:    map[string]any{"passed": 0, "failed": 0, "output": ""},
-			Message: "stub: run_tests executes via xdev rpc in a restricted --add-dir workspace",
-		}, nil
+		return r.runTests(ctx, args)
 	case "write_file":
-		return ToolResult{
-			Success:  true,
-			Data:     map[string]any{"path": "", "written": false},
-			Message:  "stub: write_file executes via xdev rpc in a restricted --add-dir workspace; nothing was written",
-			Metadata: map[string]string{"idempotency_key": "pending"},
-		}, nil
+		return r.writeFile(ctx, args)
 	}
 	return ToolResult{}, fmt.Errorf("unknown tool: %s", name)
 }
@@ -144,4 +157,150 @@ func (r *Registry) queryKnowledge(ctx context.Context, args map[string]any) (Too
 			"freshness":        resp.Freshness(),
 		},
 	}, nil
+}
+
+// runTests runs the workspace's tests as one xdev turn.
+//
+// It is a prompt to the sandbox rather than a fork/exec of `go test`,
+// because the whole reason xdev is in this architecture is that it owns
+// the turn: the model inside it decides how to run the suite, reads the
+// failures and can fix them inside the same step (PRD §4.1 — "agentloop
+// drives xdev as a tool executor for ONE already-planned step"). agentloop
+// still owns the bound: the turn's context is the step's.
+//
+// The result is deliberately honest about which of three things happened:
+// no executor, a failed turn, or a turn that ran. A caller can never
+// mistake "no sandbox" for "tests passed".
+func (r *Registry) runTests(ctx context.Context, args map[string]any) (ToolResult, error) {
+	if r.Sandbox == nil {
+		return ToolResult{
+			Success: true,
+			Data:    map[string]any{"ran": false, "output": ""},
+			Message: "no executor configured (AGENTLOOP_XDEV_OFF); the step ran and no tests were executed",
+		}, nil
+	}
+	cwd, _ := args["cwd"].(string)
+	extra, _ := args["args"].([]any)
+	prompt := testPrompt(cwd, extra)
+
+	turn, err := r.Sandbox.Prompt(ctx, prompt)
+	if err != nil {
+		// A sandbox that failed is an observation, not a crash: the run
+		// keeps its steps and the reason is recorded (same rule as LeanKG).
+		return ToolResult{
+			Success:  false,
+			Data:     map[string]any{"ran": false, "error": err.Error()},
+			Message:  fmt.Sprintf("xdev test turn failed: %v", err),
+			Metadata: map[string]string{"sandbox": "xdev"},
+		}, nil
+	}
+	return ToolResult{
+		Success: true,
+		Data: map[string]any{
+			"ran":         true,
+			"output":      turn.Text,
+			"stop_reason": turn.StopReason,
+			"model":       turn.Model,
+			"events":      len(turn.Events),
+			"duration_ms": turn.Duration.Milliseconds(),
+		},
+		Message:  summarise(turn.Text),
+		Metadata: map[string]string{"sandbox": "xdev", "stop_reason": turn.StopReason},
+	}, nil
+}
+
+// writeFile asks the sandbox to make a file change, as one xdev turn.
+//
+// The approval gate is upstream (Categorize puts write_file in
+// CatApprove), so by the time this runs a human has already said yes —
+// which is why this function does not re-prompt. The idempotency key rides
+// back in Metadata because the caller (the runner) persists it.
+func (r *Registry) writeFile(ctx context.Context, args map[string]any) (ToolResult, error) {
+	path, _ := args["path"].(string)
+	content, _ := args["content"].(string)
+	if path == "" {
+		// Fail closed and loudly: a write with no target is how a run
+		// scribbles on a workspace it cannot name.
+		return ToolResult{
+			Success: false,
+			Data:    map[string]any{"path": "", "written": false},
+			Message: "write_file requires a path",
+		}, nil
+	}
+	if r.Sandbox == nil {
+		return ToolResult{
+			Success:  true,
+			Data:     map[string]any{"path": path, "written": false},
+			Message:  "no executor configured (AGENTLOOP_XDEV_OFF); the step ran and nothing was written",
+			Metadata: map[string]string{"idempotency_key": "pending"},
+		}, nil
+	}
+
+	turn, err := r.Sandbox.Prompt(ctx, writePrompt(path, content))
+	if err != nil {
+		return ToolResult{
+			Success:  false,
+			Data:     map[string]any{"path": path, "written": false, "error": err.Error()},
+			Message:  fmt.Sprintf("xdev write turn failed: %v", err),
+			Metadata: map[string]string{"sandbox": "xdev", "idempotency_key": "pending"},
+		}, nil
+	}
+	return ToolResult{
+		Success: true,
+		Data: map[string]any{
+			"path":        path,
+			"written":     true,
+			"output":      turn.Text,
+			"stop_reason": turn.StopReason,
+			"duration_ms": turn.Duration.Milliseconds(),
+		},
+		Message:  summarise(turn.Text),
+		Metadata: map[string]string{"sandbox": "xdev", "stop_reason": turn.StopReason, "idempotency_key": "pending"},
+	}, nil
+}
+
+// testPrompt frames the verification half of the write-test-fix loop.
+// One instruction, one job: run the suite, report what failed.
+func testPrompt(cwd string, extra []any) string {
+	var b strings.Builder
+	b.WriteString("Run this workspace's test suite and report the result.")
+	if cwd != "" {
+		fmt.Fprintf(&b, " Work in %s.", cwd)
+	}
+	if len(extra) > 0 {
+		parts := make([]string, 0, len(extra))
+		for _, a := range extra {
+			if s, ok := a.(string); ok {
+				parts = append(parts, s)
+			}
+		}
+		if len(parts) > 0 {
+			fmt.Fprintf(&b, " Pass these arguments: %s.", strings.Join(parts, " "))
+		}
+	}
+	b.WriteString(" Report: the command you ran, the number of tests that passed and failed, " +
+		"and the exact failure output for anything that failed. Do not change any file.")
+	return b.String()
+}
+
+// writePrompt frames one file change. It names the path once and gives the
+// content verbatim: an agent asked to "improve" a file will, and this step
+// already decided what the change is.
+func writePrompt(path, content string) string {
+	return fmt.Sprintf("Write exactly this content to the file %q, creating it if it does not exist. "+
+		"Make no other change, and report only whether the write succeeded.\n\n%s", path, content)
+}
+
+// summarise trims a turn's report to the first non-empty line, so a step
+// record stays readable while the full text stays in Data.
+func summarise(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if s := strings.TrimSpace(line); s != "" {
+			if len(s) > 200 {
+				return s[:200] + "…"
+			}
+			return s
+		}
+	}
+	return "turn produced no output"
 }
