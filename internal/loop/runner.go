@@ -645,9 +645,8 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 				}}
 				r.screenErrors = append(r.screenErrors, fmt.Sprintf("step %d: %v", step, serr))
 			} else {
-				hazard, prob := topHazard(nouls)
 				action := experiments.Route(nouls, sev, r.cfg.Policy)
-				screens = screenRows(hazard, prob, sev, action)
+				screens = ScreenRowsFor(nouls, sev, action)
 				if action == "review" || action == "block" {
 					// The screened content never reaches the model, so this
 					// step is the only record of what the screen saw.

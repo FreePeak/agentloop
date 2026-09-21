@@ -33,11 +33,17 @@ func topHazard(nouls map[string]float64) (string, float64) {
 	return best, prob
 }
 
-// screenRows is the audit record of one verdict: the hazard that fired with
-// its probability, plus — when the severity Score is what escalated the
-// action — the severity itself. A single hazard row on a severity-driven
-// block would claim a low probability caused it.
-func screenRows(hazard string, prob, severity float64, action string) []ScreenResult {
+// ScreenRowsFor is the audit record of one verdict: the hazard that fired with
+// its probability, plus — when the severity Score is what escalated the action
+// — the severity itself. A single hazard row on a severity-driven block would
+// claim a low probability caused it.
+//
+// Exported because two call sites screen: the step boundary (inside the loop)
+// and the goal, before the first step (the service). Both must record the same
+// thing, and a second implementation is how one of them drifts back to the
+// constant label.
+func ScreenRowsFor(nouls map[string]float64, severity float64, action string) []ScreenResult {
+	hazard, prob := topHazard(nouls)
 	if hazard == "" {
 		return []ScreenResult{{Hazard: "noul_battery", Prob: severity, Action: action}}
 	}

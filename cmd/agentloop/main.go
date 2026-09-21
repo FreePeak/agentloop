@@ -179,18 +179,25 @@ func (s *Server) screenFunc() loop.ScreenFunc {
 	}
 }
 
-// screenGoal judges the submitted goal before any step runs. It returns
-// the routed action ("pass"/"review"/"block") or an error when the screen
-// could not run — which the caller records rather than treating as clean.
-func (s *Server) screenGoal(goal string) (string, error) {
+// screenGoal judges the submitted goal before any step runs. It returns the
+// routed action ("pass"/"review"/"block") and the screen rows to record, or an
+// error when the screen could not run — which the caller records rather than
+// treating as clean.
+//
+// The rows come back with the verdict on purpose: the alternative is calling
+// the screen twice, or recording the action with none of the content that
+// decided it — which is how a blocked run ends up saying `noul_battery` and
+// nothing else.
+func (s *Server) screenGoal(goal string) (string, []loop.ScreenResult, error) {
 	if s.guardrail == nil {
-		return "", nil
+		return "", nil, nil
 	}
 	v, err := s.guardrail.Screen(context.Background(), goal)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return experiments.Route(v.Nouls, v.Severity, policyFromEnv()), nil
+	action := experiments.Route(v.Nouls, v.Severity, policyFromEnv())
+	return action, loop.ScreenRowsFor(v.Nouls, v.Severity, action), nil
 }
 
 // policyFromEnv selects the guardrail threshold set (PRD §17): strict is the
@@ -300,7 +307,7 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) {
 	// context is the injection surface" — the goal is the first thing that
 	// enters it). A block here is the run never starting, which is the
 	// correct outcome for an injection; a review holds it for a human.
-	if verdict, err := s.screenGoal(body.Goal); err != nil {
+	if verdict, screens, err := s.screenGoal(body.Goal); err != nil {
 		blocked := loop.RunResult{
 			RunID:        runID,
 			State:        loop.StateExhausted,
@@ -327,13 +334,11 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) {
 			State:      state,
 			ExitReason: loop.ExitGuardrailBlock,
 			Steps: []loop.StepRecord{{
-				StepID: 0,
-				Phase:  "evaluate",
-				Tool:   "(goal screen)",
-				Why:    "guardrail: " + verdict,
-				Screens: []loop.ScreenResult{{
-					Hazard: "noul_battery", Action: verdict,
-				}},
+				StepID:  0,
+				Phase:   "evaluate",
+				Tool:    "(goal screen)",
+				Why:     "guardrail: " + verdict,
+				Screens: screens,
 			}},
 		}
 		held.Success = boolPtr(false)

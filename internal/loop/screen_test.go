@@ -144,7 +144,7 @@ func TestTopHazard_StableOnTie(t *testing.T) {
 	if h, _ := topHazard(nil); h != "" {
 		t.Errorf("empty battery hazard = %q, want \"\" (no hazard was reported)", h)
 	}
-	if rows := screenRows("", 0, 1.5, "review"); len(rows) != 1 || rows[0].Hazard != "noul_battery" {
+	if rows := ScreenRowsFor(nil, 1.5, "review"); len(rows) != 1 || rows[0].Hazard != "noul_battery" {
 		t.Errorf("rows for an unreported battery = %+v, want the single legacy row", rows)
 	}
 }
