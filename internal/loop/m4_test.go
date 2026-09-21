@@ -40,7 +40,7 @@ func TestResumeFromCheckpoint_FaultAtStep7(t *testing.T) {
 			panic("step-7 fault")
 		}
 		atomic.AddInt32(&execCount, 1)
-		return "repo_search", map[string]any{"step": step}
+		return "query", map[string]any{"step": step}
 	}
 
 	cfg := loop.RunnerConfig{

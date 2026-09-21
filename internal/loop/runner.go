@@ -625,10 +625,10 @@ func synthesizePartial(steps []StepRecord) string {
 }
 
 // nextToolDefault returns the tool and args for a step. M1 uses a
-// deterministic rotation over the 5 v1 tools for testing;
+// deterministic rotation over the 4 v1 tools for testing;
 // production replaces this with the planner's output.
 func nextToolDefault(step int, cfg RunnerConfig) (string, map[string]any) {
-	tools := []string{"repo_search", "repo_context", "web_search", "run_tests", "write_file"}
+	tools := []string{"query", "web_search", "run_tests", "write_file"}
 	name := tools[step%len(tools)]
 	return name, map[string]any{"step": step, "goal": cfg.Goal}
 }

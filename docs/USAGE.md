@@ -37,7 +37,7 @@ Read this before you plan work around it. As of this writing:
 | HITL approval gate wired into the runner | **implemented, and it holds** (PR #16 fixed a wiring bug where the gate was built but passed as `nil`). The *hold* works; approval is recorded but does **not** resume the run — §3, §9 |
 | HTTP API, admin console, eval harness | **implemented** |
 | Model calls to onegw | **not yet** — there is no outbound client in the loop path |
-| The five built-in tools | **stubs** — each returns a canned `Success: true` (`internal/tools/registry_impl.go:46`) |
+| The four built-in tools | **stubs** — each returns a canned `Success: true` (`internal/tools/registry_impl.go:44`) |
 | The planner | **deterministic**, no model calls; model-driven planning is the documented production path |
 | M7 multi-agent (`internal/supervisor`) | **gated shut** by design — refused unless one of [PRD §10](PRD.md#10-multi-agent-stance)'s four conditions is met |
 
@@ -103,7 +103,7 @@ curl -sS localhost:8081/v1/runs/9f2c… | python3 -m json.tool
 first lesson about how agentloop behaves today. The gate categorizes tools by
 name (`internal/loop/approval.go:27`) and only `read`/`search`/`list`/`get` run
 automatically; anything unrecognized falls to `CatApprove` **fail-closed**. The
-five built-in tool names (`repo_search`, `repo_context`, `web_search`,
+four built-in tool names (`query`, `web_search`,
 `run_tests`, `write_file`) all land in that default branch, so a gated run pauses
 on its very first step and waits for you.
 
@@ -271,7 +271,7 @@ Stated plainly, so nobody discovers it the hard way:
   through.
 - **No outbound model client.** The loop never calls onegw. Everything above
   runs against stubbed tools and a deterministic planner.
-- **The five tools are stubs.** `repo_search`/`repo_context` should reach LeanKG;
+- **The four tools are stubs.** `query` should reach LeanKG `POST /api/v1/query`;
   `run_tests`/`write_file` should go through xdev rpc in a restricted workspace.
 - **The kill endpoint does not reach a live run.** `POST /v1/runs/{id}/kill`
   rewrites the stored state to `killed` (`cmd/agentloop/main.go:114` sets
