@@ -273,6 +273,15 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runID := generateRunID()
+	// Register the run the instant the caller has a run id — before any
+	// path can exit. Every exit writes its outcome through
+	// storeRunIfPresent, which refuses to create a row, so a run that is
+	// never registered loses its result: a blocked goal would 201 with a
+	// run id that resolves to nothing.
+	s.mu.Lock()
+	s.runs[runID] = loop.RunResult{RunID: runID, State: loop.StateQueued}
+	s.mu.Unlock()
+
 	maxSteps := loop.MaxSteps
 	if body.MaxSteps != nil {
 		maxSteps = *body.MaxSteps
@@ -315,9 +324,7 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) {
 			ScreenErrors: []string{err.Error()},
 		}
 		blocked.Success = boolPtr(false)
-		s.mu.Lock()
-		s.runs[runID] = blocked
-		s.mu.Unlock()
+		s.storeRunIfPresent(runID, blocked)
 		// The run id must reach the caller even when the goal is blocked:
 		// a 201 with no body is a client that cannot look up what happened.
 		w.Header().Set("Content-Type", "application/json")
@@ -342,30 +349,53 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) {
 			}},
 		}
 		held.Success = boolPtr(false)
-		s.mu.Lock()
-		s.runs[runID] = held
-		s.mu.Unlock()
+		s.storeRunIfPresent(runID, held)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		writeJSON(w, map[string]any{"run_id": runID, "state": held.State, "exit_reason": held.ExitReason})
 		return
 	}
+	// The first of three forms of visibility: the run is registered, so a
+	// poll resolves and the P75 kill endpoint has something to signal for
+	// the whole run rather than only once it ends.
 	s.mu.Lock()
 	s.runners[runID] = runner
 	s.gates[runID] = gate
 	s.mu.Unlock()
+	// The second form: every step boundary refreshes what a watcher
+	// reads, so a poll shows the steps that have run so far rather than
+	// nothing at all. Attached before Run starts, or the first boundary
+	// races the goroutine.
+	runner.WithProgress(func(partial loop.RunResult) {
+		s.storeRunIfPresent(runID, partial)
+	})
 	go func() {
 		result, err := runner.Run(context.Background())
 		if err != nil {
 			result.State = loop.StateFailed
 		}
-		s.mu.Lock()
-		s.runs[runID] = result
-		s.mu.Unlock()
+		// The third form: the finished result. Without this the run would
+		// stay at its last in-flight snapshot forever, so a watcher would
+		// never see the terminal state, the exit reason, or the synthesis.
+		s.storeRunIfPresent(runID, result)
 	}()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	writeJSON(w, map[string]any{"run_id": runID, "state": loop.StateThinking})
+	writeJSON(w, map[string]any{"run_id": runID, "state": loop.StateQueued})
+}
+
+// storeRunIfPresent records a run's result only while the run is still
+// known. DELETE removes the key, and a run's final write lands *after*
+// that — so an unconditional store let a deleted run reappear, on the
+// terminal write and on every progress report in between. A run an
+// operator removed stays removed.
+func (s *Server) storeRunIfPresent(runID string, result loop.RunResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.runs[runID]; !ok {
+		return
+	}
+	s.runs[runID] = result
 }
 
 func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
@@ -384,8 +414,8 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 func (s *Server) killRun(w http.ResponseWriter, r *http.Request) {
 	runID := extractRunID(r.URL.Path)
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	result, ok := s.runs[runID]
-	s.mu.Unlock()
 	if !ok {
 		http.Error(w, `{"error":"run not found"}`, http.StatusNotFound)
 		return
@@ -395,18 +425,14 @@ func (s *Server) killRun(w http.ResponseWriter, r *http.Request) {
 	if result.PartialSynthesis == "" {
 		result.PartialSynthesis = "killed by operator"
 	}
-	// Signal the live runner's kill channel so the running
-	// goroutine exits within one step (P75). Without this the
-	// stored state is stamped but the loop keeps going.
-	s.mu.Lock()
+	// Signal the live runner's kill channel so the running goroutine exits
+	// within one step (P75). The runner is read under the same lock as the
+	// run state: if the run is already known, the runner should be too.
 	runner := s.runners[runID]
-	s.mu.Unlock()
+	s.runs[runID] = result
 	if runner != nil {
 		runner.Kill()
 	}
-	s.mu.Lock()
-	s.runs[runID] = result
-	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, result)
 }
@@ -484,9 +510,7 @@ func (s *Server) submitApproval(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			result.State = loop.StateFailed
 		}
-		s.mu.Lock()
-		s.runs[runID] = result
-		s.mu.Unlock()
+		s.storeRunIfPresent(runID, result)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]any{"approved": approved})
@@ -509,9 +533,7 @@ func (s *Server) submitApprovalByID(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			result.State = loop.StateFailed
 		}
-		s.mu.Lock()
-		s.runs[runID] = result
-		s.mu.Unlock()
+		s.storeRunIfPresent(runID, result)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]any{"approved": approved})

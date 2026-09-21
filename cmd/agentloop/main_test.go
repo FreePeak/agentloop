@@ -26,6 +26,87 @@ func newTestServer(t *testing.T) (*httptest.Server, *Server) {
 	return srv, s
 }
 
+// TestRunVisibleWhileInFlight is the check for the run-visibility bug:
+// submit used to return a run id that no endpoint could resolve until the
+// loop finished, so a poll 404'd for the whole run and the P75 kill was
+// unreachable. The run must be readable the moment the 201 lands.
+func TestRunVisibleWhileInFlight(t *testing.T) {
+	srv, _ := newTestServer(t)
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/runs", "application/json",
+		strings.NewReader(`{"goal":"visibility","context":"test"}`))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	var submit map[string]any
+	json.NewDecoder(resp.Body).Decode(&submit)
+	resp.Body.Close()
+	runID, _ := submit["run_id"].(string)
+
+	// No polling, no sleep: the id the caller was just handed must resolve.
+	getResp, err := http.Get(srv.URL + "/v1/runs/" + runID)
+	if err != nil {
+		t.Fatalf("GET immediately after submit: %v", err)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET immediately after submit = %d, want 200 (run in flight must be readable)", getResp.StatusCode)
+	}
+	var got RunResultResponse
+	if err := json.NewDecoder(getResp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.RunID != runID {
+		t.Errorf("run_id = %q, want %q", got.RunID, runID)
+	}
+
+	// The kill endpoint must also reach it while it is still running.
+	killResp, err := http.Post(srv.URL+"/v1/runs/"+runID+"/kill", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST kill: %v", err)
+	}
+	defer killResp.Body.Close()
+	if killResp.StatusCode != http.StatusOK {
+		t.Fatalf("kill while in flight = %d, want 200 (P75 must reach a live run)", killResp.StatusCode)
+	}
+	var killed map[string]any
+	json.NewDecoder(killResp.Body).Decode(&killed)
+	if killed["state"] != string(loop.StateKilled) {
+		t.Errorf("state = %v, want %v", killed["state"], loop.StateKilled)
+	}
+	// And deleting a finished run stays deleted: the loop goroutine writes
+	// its own result after the run ends, and that write must not resurrect
+	// a run an operator removed (it used to, by re-inserting the map key).
+	delReq, _ := http.NewRequest("DELETE", srv.URL+"/v1/runs/"+runID, nil)
+	delResp, err := http.DefaultClient.Do(delReq)
+	if err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	delResp.Body.Close()
+	if delResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE = %d, want 204", delResp.StatusCode)
+	}
+	waitForRunGone(t, srv, runID)
+	waitForRunGone(t, srv, runID)
+}
+
+// waitForRunGone polls until the run id stops resolving.
+func waitForRunGone(t *testing.T, srv *httptest.Server, runID string) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		resp, err := http.Get(srv.URL + "/v1/runs/" + runID)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusNotFound {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("run still resolves after delete")
+}
+
 // routes registers all HTTP routes on a ServeMux — shared between
 // production main() and tests so handlers stay in sync.
 func routes(s *Server) *http.ServeMux {
@@ -149,23 +230,34 @@ func TestLive_KillRun(t *testing.T) {
 	}
 }
 
-// waitForRun polls GET /v1/runs/{id} until the run result
-// is stored in the server. Used by kill/delete/console tests
-// to avoid a race with the background goroutine.
+func stateFor(t *testing.T, srv *httptest.Server, runID string, i int) string {
+	t.Helper()
+	resp, err := http.Get(srv.URL + "/v1/runs/" + runID)
+	if err != nil {
+		t.Fatalf("GET run (i=%d): %v", i, err)
+	}
+	defer resp.Body.Close()
+	var result RunResultResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	return result.State
+}
+
+// waitForRun polls GET /v1/runs/{id} until the run reaches a terminal state.
+// A run in flight is readable now, so "still thinking" is not "not stored":
+// the delete endpoints already gate on the run id, not the terminal state.
 func waitForRun(t *testing.T, srv *httptest.Server, runID string) {
 	t.Helper()
-	for i := 0; i < 50; i++ {
-		getResp, gerr := http.Get(srv.URL + "/v1/runs/" + runID)
-		if gerr == nil && getResp.StatusCode == http.StatusOK {
-			getResp.Body.Close()
+	for i := 0; i < 300; i++ {
+		switch stateFor(t, srv, runID, i) {
+		case "", string(loop.StateThinking), string(loop.StateQueued),
+			string(loop.StateActing), string(loop.StateEvaluating):
+			// in flight, keep waiting
+		default:
 			return
 		}
-		if getResp != nil {
-			getResp.Body.Close()
-		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatal("run never stored")
+	t.Fatal("run never reached a terminal state")
 }
 
 // TestDeleteRun submits a run, deletes it, and confirms 404 after.
@@ -454,7 +546,10 @@ func TestM6_Demo_HITLWithEvals(t *testing.T) {
 		var result RunResultResponse
 		json.NewDecoder(getResp.Body).Decode(&result)
 		getResp.Body.Close()
-		if result.State != "" {
+		// "thinking" means the run is in flight — since the visibility fix
+		// that is a real answer, not the absence of one, so wait for a
+		// state the run has actually settled into.
+		if result.State != "" && result.State != string(loop.StateThinking) {
 			break
 		}
 	}
@@ -558,7 +653,7 @@ func TestM5_GateRegisteredForNewRun(t *testing.T) {
 		var result RunResultResponse
 		der := json.NewDecoder(getResp.Body).Decode(&result)
 		getResp.Body.Close()
-		if der == nil && result.State != "" {
+		if der == nil && result.State != "" && result.State != string(loop.StateThinking) {
 			state = result.State
 			break
 		}
