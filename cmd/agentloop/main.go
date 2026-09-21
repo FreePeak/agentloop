@@ -17,6 +17,7 @@ import (
 
 	"github.com/FreePeak/agentloop/internal/budget"
 	"github.com/FreePeak/agentloop/internal/eval"
+	"github.com/FreePeak/agentloop/internal/leankg"
 	"github.com/FreePeak/agentloop/internal/loop"
 	"github.com/FreePeak/agentloop/internal/onegw"
 	"github.com/FreePeak/agentloop/internal/planner"
@@ -36,28 +37,38 @@ type Server struct {
 	model      *onegw.Client
 }
 
-// NewServer creates a Server with the 4 v1 tools and empty stores.
+// NewServer creates a Server with the v1 tool set and empty stores.
 //
-// The model transport comes from the environment, because the endpoint
-// and the combo are deployment facts, not code:
+// Both outbound dependencies are wired from the environment, because
+// endpoints and credentials are deployment facts, not code:
 //
 //	AGENTLOOP_ONEGW_URL    default http://127.0.0.1:8080
 //	AGENTLOOP_ONEGW_KEY    bearer key; empty sends no Authorization header
 //	AGENTLOOP_ONEGW_COMBO  routing combo used as the wire model, default "dev"
+//	AGENTLOOP_LEANKG_URL   code-graph root, default http://127.0.0.1:8090
+//	AGENTLOOP_LEANKG_OFF   any value disables the knowledge client
+//
+// The tool registry is built once and shared: every run's steps go through
+// the same `query` client, which is the point of a registry.
+//
+// The eval runner deliberately gets a registry with **no** knowledge client
+// and no model: the M6 deploy gate must stay deterministic and offline, so it
+// must not depend on LeanKG or onegw being up (PRD §11.4).
 func NewServer() *Server {
+	reg := tools.NewRegistryWithKnowledge(leankgFromEnv())
 	return &Server{
 		runs:    make(map[string]loop.RunResult),
 		runners: make(map[string]*loop.LoopRunner),
 		gates:   make(map[string]*loop.ApprovalGate),
-		tools:   tools.NewRegistry(),
+		tools:   reg,
 		model: onegw.New(
 			envOr("AGENTLOOP_ONEGW_URL", "http://127.0.0.1:8080"),
 			os.Getenv("AGENTLOOP_ONEGW_KEY"),
 			envOr("AGENTLOOP_ONEGW_COMBO", "dev"),
 		),
 		evalRunner: eval.NewRunner(func(cfg loop.RunnerConfig) (*loop.LoopRunner, *budget.Guard, tools.ToolRegistry, error) {
-			return loop.NewRunner(cfg, budget.New(cfg.CostBudget, float64(loop.DailyCeilingMult)*cfg.CostBudget), tools.NewRegistry()),
-				budget.New(cfg.CostBudget, float64(loop.DailyCeilingMult)*cfg.CostBudget), tools.NewRegistry(), nil
+			g := budget.New(cfg.CostBudget, float64(loop.DailyCeilingMult)*cfg.CostBudget)
+			return loop.NewRunner(cfg, g, tools.NewRegistry()), g, tools.NewRegistry(), nil
 		}),
 	}
 }
@@ -68,6 +79,20 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// leankgFromEnv wires the code-graph client from the environment.
+//
+//	AGENTLOOP_LEANKG_URL   default http://127.0.0.1:8090
+//	AGENTLOOP_LEANKG_OFF   any non-empty value disables retrieval
+//
+// No LeanKG API key: the service is local and its REST surface is
+// unauthenticated by design for a single-tenant deployment (PRD §7.4).
+func leankgFromEnv() *leankg.Client {
+	if os.Getenv("AGENTLOOP_LEANKG_OFF") != "" {
+		return nil
+	}
+	return leankg.New(envOr("AGENTLOOP_LEANKG_URL", "http://127.0.0.1:8090"))
 }
 
 type runRequest struct {

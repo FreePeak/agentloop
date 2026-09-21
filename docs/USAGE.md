@@ -37,7 +37,7 @@ Read this before you plan work around it. As of this writing:
 | HITL approval gate wired into the runner | **implemented and working**: the gate holds a write, and approving it **resumes** the run. The read-only three tools never interrupt; `write_file` always holds — §3, §9 |
 | HTTP API, admin console, eval harness | **implemented** |
 | Model calls to onegw | **partial** — one outbound call, at synthesis (§2, §9). The loop's *planning* still makes none |
-| The four built-in tools | **stubs** — each returns a canned `Success: true` (`internal/tools/registry_impl.go:44`) |
+| The four built-in tools | **one real, three stubs** — `query` reaches LeanKG and returns its envelope; `web_search`, `run_tests`, `write_file` return canned results whose message says `stub` (`internal/tools/registry_impl.go`) |
 | The planner | **deterministic**, no model calls; model-driven planning is the documented production path |
 | M7 multi-agent (`internal/supervisor`) | **gated shut** by design — refused unless one of [PRD §10](PRD.md#10-multi-agent-stance)'s four conditions is met |
 
@@ -83,28 +83,28 @@ make prd        # the PRD asserts its own promises (12 properties)
 
 Override the port: `make run PORT=9090`.
 
-### The gateway (M8)
+### Configuration the binary reads
 
-The loop reaches onegw through three environment variables. They are
-deployment facts, so they are not in the binary:
+Deployment facts, not compiled defaults:
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `AGENTLOOP_PORT` | `8080` (the Makefile passes 8081) | listen port |
 | `AGENTLOOP_ONEGW_URL` | `http://127.0.0.1:8080` | gateway base URL |
 | `AGENTLOOP_ONEGW_KEY` | *(empty)* | bearer key; empty sends **no** `Authorization` header |
 | `AGENTLOOP_ONEGW_COMBO` | `dev` | combo name, used as the wire `model` |
+| `AGENTLOOP_LEANKG_URL` | `http://127.0.0.1:8090` | LeanKG REST root behind the `query` tool |
+| `AGENTLOOP_LEANKG_OFF` | *(unset)* | any value disables the knowledge client; `query` then says no service is configured |
 
-Take the key from `onegw.toml`'s `[auth] [[auth.keys]]` and pass it as
-`AGENTLOOP_ONEGW_KEY`.
+Take the onegw key from `onegw.toml`'s `[auth] [[auth.keys]]`; the combo must
+exist there too, since the client sends whatever name you give it and onegw
+rejects an unknown one. **The port clash is yours to handle:** onegw owns
+`127.0.0.1:8080`, so leave `AGENTLOOP_ONEGW_URL` alone and change `PORT`.
 
-The combo must exist in `onegw.toml`; the client sends whatever name you give
-it and onegw rejects an unknown one. **The port clash is yours to handle:**
-onegw owns `127.0.0.1:8080`, so leave `AGENTLOOP_ONEGW_URL` alone and change
-`PORT` instead.
-
-If the gateway is unreachable or rejects the key, a run still completes: the
-synthesis call is the only model call, and it falls back to the deterministic
-partial, recording the failure in the run's `synthesis_error` field.
+Both outbound dependencies degrade the same way — a run still completes. A
+gateway that is unreachable falls back to the deterministic partial and records
+`synthesis_error`; a LeanKG that is down records the transport error on the step
+and the loop keeps its bounds.
 
 ## 3. A first run, end to end
 
@@ -286,15 +286,22 @@ Stated plainly, so nobody discovers it the hard way:
   stored state *and* signals the runner's kill channel, which `Run()` checks at
   every step boundary. The stop is bounded by one step, not instant — a step
   already in flight finishes first.
-- **The four tools are stubs.** `query` should reach LeanKG `POST /api/v1/query`;
-  `run_tests`/`write_file` should go through xdev rpc in a restricted workspace.
+- **Three of the four tools are stubs.** `query` is **real**: it reaches LeanKG
+  `POST /api/v1/query` and reports the retrieval rung that answered.
+  `web_search` has no client, and `run_tests`/`write_file` should go through xdev
+  rpc in a restricted workspace. Each stub says so in its result message, so a
+  step that did nothing cannot be read as one that worked.
+- **Retrieval needs a LeanKG to point at.** `AGENTLOOP_LEANKG_URL` (default
+  `http://127.0.0.1:8090`); `AGENTLOOP_LEANKG_OFF=1` disables the client, and the
+  tool then says no knowledge service is configured. A LeanKG that is *down* is
+  an observation, not a crash: the step records the reason and the run keeps its
+  bounds.
 - **Tier routing is half-wired** — see §6.
 - **M7 is gated shut**, correctly: the gate is a measurement, not a milestone,
   and it opens only when a [PRD §10](PRD.md#10-multi-agent-stance) condition is
   actually met.
 
-In rough order: **a real LeanKG `query` client** (the tool is still a stub, so
-the steps above execute and read nothing), a **model-driven planner** (the one
-call the loop makes today is the synthesis), then
+In rough order: a **model-driven planner** (`query` retrieval and onegw
+synthesis both exist now; planning is the last deterministic piece), then
 xdev-rpc execution for `run_tests`/`write_file`, and with it the tier
 propagation of §6.
