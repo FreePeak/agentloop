@@ -37,7 +37,7 @@ Read this before you plan work around it. As of this writing:
 | HITL approval gate wired into the runner | **implemented and working**: the gate holds a write, and approving it **resumes** the run. The read-only three tools never interrupt; `write_file` always holds — §3, §9 |
 | HTTP API, admin console, eval harness | **implemented** |
 | Model calls to onegw | **partial** — one outbound call, at synthesis (§2, §9). The loop's *planning* still makes none |
-| The four built-in tools | **one real, three stubs** — `query` reaches LeanKG and returns its envelope; `web_search`, `run_tests`, `write_file` return canned results whose message says `stub` (`internal/tools/registry_impl.go`) |
+| The four built-in tools | **three real, one stub** — `query` reaches LeanKG; `run_tests` and `write_file` each run as one **xdev turn** in a sandboxed workspace (so the loop can actually write and verify); `web_search` still returns a canned result whose message says `stub` |
 | The planner | **deterministic**, no model calls; model-driven planning is the documented production path |
 | M7 multi-agent (`internal/supervisor`) | **gated shut** by design — refused unless one of [PRD §10](PRD.md#10-multi-agent-stance)'s four conditions is met |
 
@@ -102,6 +102,9 @@ Deployment facts, not compiled defaults:
 | `AGENTLOOP_ONEGW_COMBO` | `dev` | combo name, used as the wire `model` |
 | `AGENTLOOP_LEANKG_URL` | `http://127.0.0.1:8090` | LeanKG REST root behind the `query` tool |
 | `AGENTLOOP_LEANKG_OFF` | *(unset)* | any value disables the knowledge client; `query` then says no service is configured |
+| `AGENTLOOP_XDEV_BIN` | `xdev` | the sandbox binary; agentloop speaks its `rpc` JSONL protocol |
+| `AGENTLOOP_XDEV_DIR` | a fresh temp dir | the workspace `write_file`/`run_tests` turns run in |
+| `AGENTLOOP_XDEV_OFF` | *(unset)* | any value disables the sandbox; those two tools then report no executor |
 
 Take the onegw key from `onegw.toml`'s `[auth] [[auth.keys]]`; the combo must
 exist there too, since the client sends whatever name you give it and onegw
@@ -293,11 +296,18 @@ Stated plainly, so nobody discovers it the hard way:
   stored state *and* signals the runner's kill channel, which `Run()` checks at
   every step boundary. The stop is bounded by one step, not instant — a step
   already in flight finishes first.
-- **Three of the four tools are stubs.** `query` is **real**: it reaches LeanKG
-  `POST /api/v1/query` and reports the retrieval rung that answered.
-  `web_search` has no client, and `run_tests`/`write_file` should go through xdev
-  rpc in a restricted workspace. Each stub says so in its result message, so a
-  step that did nothing cannot be read as one that worked.
+- **`web_search` is the last stub.** It has no client, and says so in its result
+  message, so a step that did nothing cannot be read as one that worked.
+- **`write_file` and `run_tests` are real, and they need a sandbox.** Each runs
+  as **one xdev turn** (`internal/xdev` speaks xdev's `rpc` JSONL protocol).
+  agentloop owns the loop and the bound; xdev owns the turn — the file mutation,
+  the test run, the model call inside it (PRD §4.3). With no xdev binary
+  reachable, both tools report *no executor configured* and `Data[written]` /
+  `Data[ran]` stay false, so "no sandbox" can never be read as "the write
+  succeeded" or "the tests passed".
+- **The turn is bounded by the step, not by xdev.** If a step's budget expires
+  mid-turn the client kills the child, rather than leaving a half-read stream
+  and a sandbox still mutating a workspace.
 - **Retrieval needs a LeanKG to point at.** `AGENTLOOP_LEANKG_URL` (default
   `http://127.0.0.1:8090`); `AGENTLOOP_LEANKG_OFF=1` disables the client, and the
   tool then says no knowledge service is configured. A LeanKG that is *down* is
