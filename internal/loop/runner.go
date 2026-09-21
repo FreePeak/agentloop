@@ -502,12 +502,16 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 		}
 
 		if err != nil || !tr.Success {
+			// A tool may report failure as an observation (Success=false,
+			// nil error) — the LeanKG client does exactly that on an
+			// outage. Dereferencing err here unconditionally panicked on
+			// that path, so the reason is rendered defensively.
 			result.Steps = append(result.Steps, StepRecord{
 				StepID:    step,
 				Phase:     "act",
 				Tool:      toolName,
 				ArgsHash:  argsHash,
-				Result:    map[string]any{"error": err.Error(), "message": tr.Message},
+				Result:    map[string]any{"error": stepError(err, tr), "message": tr.Message},
 				CostUSD:   0.001,
 				LatencyMs: latency,
 			})
@@ -670,4 +674,17 @@ func canonicalArgs(v any) any {
 	}
 }
 
+// stepError renders the reason a step failed. A tool can fail two ways:
+// a Go error (transport, validation) or a typed ToolResult with
+// Success=false and no error (a dependency answering with a failure).
+// Both are ordinary observations; neither may panic.
+func stepError(err error, tr tools.ToolResult) string {
+	if err != nil {
+		return err.Error()
+	}
+	if tr.Message != "" {
+		return tr.Message
+	}
+	return "tool reported failure with no detail"
+}
 func ptr(b bool) *bool { return &b }
