@@ -24,21 +24,21 @@ make run        # build + serve on :8081 (onegw owns 8080)
 make check      # tests + lint — before a PR
 ```
 
-Submit a run and watch it pause for approval:
+Submit a run and watch it go to work:
 
 ```bash
 curl -sS -X POST localhost:8081/v1/runs -H 'Content-Type: application/json' \
-  -d '{"goal":"smoke test","context":"hello"}'
-curl -sS localhost:8081/v1/runs/<run_id>       # => "paused_approval"
+  -d '{"goal":"explore the repository","context":"hello"}'
+curl -sS localhost:8081/v1/runs/<run_id>       # => steps run, then a hold
 ```
 
-That pause is the gate working: the v1 tool set is read-only (`query`,
-`web_search`, `run_tests`) plus `write_file` (CatConfirm), so a
-run that never asks for a delete/send/deploy never holds. Approving a held step
-**resumes the run** — the resume path is wired (M5), so the run continues past
-the approved step instead of staying `paused_approval`. Full walkthrough — API,
-states, exit reasons, tiers, approvals, and an honest list of what is still
-stubbed — in [`docs/USAGE.md`](docs/USAGE.md).
+Two things are true of that run. It **runs without asking** — the three
+read-only tools (`query`, `web_search`, `run_tests`) never interrupt. And it
+**holds on the first write**: `write_file` is approve-category, every call, so
+approving it **resumes the run** from the held step (M5) instead of leaving it
+in `paused_approval`. Full walkthrough — API, states, exit reasons, tiers,
+approvals, and an honest list of what is still stubbed — in
+[`docs/USAGE.md`](docs/USAGE.md).
 
 ---
 

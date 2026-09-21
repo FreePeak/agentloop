@@ -24,13 +24,31 @@ const (
 )
 
 // Categorize maps a tool name to its HITL category.
+//
+// The table names the v1 surface (PRD §4: query, web_search, run_tests,
+// write_file) as well as the generic vocabulary, because those four are
+// the names the runner actually passes. Before the v1 names were here,
+// every tool call fell to the fail-closed default, so every gated run
+// paused on step 1 — which is not a policy, it is a table with the wrong
+// keys, and it made M5's <10% interruption ceiling unreachable.
+//
+// Two judgement calls worth arguing with:
+//   - run_tests is read-category. It runs in the xdev sandbox
+//     (`--add-dir` restricted, PRD §4.1) and mutates nothing outside it.
+//   - write_file holds on every call. §7.3 puts irreversible writes behind
+//     confirmation, and the runner's confidence is step success (1.0/0.0),
+//     not a model's — so "auto_if_confident" here would mean "auto-approve".
+//     ponytail: no preview and no real confidence exists yet, so the writer
+//     stays held; move it to CatConfirm when either one does.
 func Categorize(tool string) Category {
 	switch {
-	case tool == "read", tool == "search", tool == "list", tool == "get":
+	case tool == "read", tool == "search", tool == "list", tool == "get",
+		tool == "query", tool == "web_search", tool == "run_tests":
 		return CatAuto
 	case tool == "update", tool == "edit", tool == "patch", tool == "write":
 		return CatConfirm
-	case tool == "delete", tool == "send", tool == "deploy", tool == "pay":
+	case tool == "delete", tool == "send", tool == "deploy", tool == "pay",
+		tool == "write_file":
 		return CatApprove
 	default:
 		return CatApprove // fail closed
