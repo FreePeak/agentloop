@@ -279,9 +279,15 @@ type RunResultResponse struct {
 	RunID      string `json:"run_id"`
 	State      string `json:"state"`
 	ExitReason string `json:"exit_reason"`
-	Steps      []struct {
-		StepID int    `json:"step_id"`
-		Tool   string `json:"tool"`
+	Usage      struct {
+		Total      int `json:"total_tokens"`
+		ModelCalls int `json:"model_calls"`
+	} `json:"usage"`
+	Steps []struct {
+		StepID int            `json:"step_id"`
+		Tool   string         `json:"tool"`
+		Args   map[string]any `json:"args"`
+		Why    string         `json:"why"`
 	} `json:"steps"`
 }
 

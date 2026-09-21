@@ -16,6 +16,11 @@ const (
 	ExitProgressStall       ExitReason = "progress_stall"
 	ExitConsecutiveFailures ExitReason = "consecutive_failures"
 	ExitGuardrailBlock      ExitReason = "guardrail_block" // M2.x: TypeSafe screen blocked
+	// ExitGoalMet is the goal predicate firing, which is not a bound: the
+	// run stopped because it was done. It is the one exit a reasoner can
+	// reach on its own, and it is distinct from max_steps on purpose
+	// (PRD move 2: "separate success from stopping").
+	ExitGoalMet ExitReason = "goal_met"
 )
 
 // AllExitReasons lists every ExitReason in declaration order. Used by tests to
@@ -24,7 +29,7 @@ func AllExitReasons() []ExitReason {
 	return []ExitReason{
 		ExitMaxSteps, ExitWallClock, ExitCostBudget, ExitDailyBudget,
 		ExitConfidenceFloor, ExitProgressStall, ExitConsecutiveFailures,
-		ExitGuardrailBlock,
+		ExitGuardrailBlock, ExitGoalMet,
 	}
 }
 
