@@ -34,7 +34,7 @@ Read this before you plan work around it. As of this writing:
 | Area | State |
 |---|---|
 | Loop bounds, six typed exits, kill, memory, checkpoints | **implemented and tested** |
-| HITL approval gate wired into the runner | **implemented, and it holds** (PR #16 fixed a wiring bug where the gate was built but passed as `nil`). The *hold* works; approval is recorded but does **not** resume the run — §3, §9 |
+| HITL approval gate wired into the runner | **implemented and working**: the gate holds a write, and approving it **resumes** the run. The read-only three tools never interrupt; `write_file` always holds — §3, §9 |
 | HTTP API, admin console, eval harness | **implemented** |
 | Model calls to onegw | **partial** — one outbound call, at synthesis (§2, §9). The loop's *planning* still makes none |
 | The four built-in tools | **stubs** — each returns a canned `Success: true` (`internal/tools/registry_impl.go:44`) |
@@ -42,8 +42,10 @@ Read this before you plan work around it. As of this writing:
 | M7 multi-agent (`internal/supervisor`) | **gated shut** by design — refused unless one of [PRD §10](PRD.md#10-multi-agent-stance)'s four conditions is met |
 
 **What this means:** a run today exercises the real loop, budget, gate, and
-observability machinery, but it does no real work — the tools return empty
+observability machinery end to end — it stops on its own bounds and it holds
+only on a write — but it does no real work, because the tools return empty
 results. It is a harness you can develop against, not yet an agent that fixes
+your code. The honest next steps are listed at the end.
 your code. The honest next steps are listed at the end.
 
 ---
@@ -122,13 +124,11 @@ Poll it:
 curl -sS localhost:8081/v1/runs/9f2c… | python3 -m json.tool
 ```
 
-**Expect `"state": "paused_approval"` — not completion.** This is the important
-first lesson about how agentloop behaves today. The gate categorizes tools by
-name (`internal/loop/approval.go:27`) and only `read`/`search`/`list`/`get` run
-automatically; anything unrecognized falls to `CatApprove` **fail-closed**. The
-four built-in tool names (`query`, `web_search`,
-`run_tests`, `write_file`) all land in that default branch, so a gated run pauses
-on its very first step and waits for you.
+**Expect a run that actually runs.** The gate categorizes tools by name
+(`internal/loop/approval.go:26`). The read-only three — `query`, `web_search`,
+`run_tests` — are `CatAuto` and never interrupt; `write_file` is `CatApprove`
+and holds **fail-closed**. So a read-only goal exhausts its step budget on its
+own, and the first write is where a human appears.
 
 Approve it:
 
@@ -142,32 +142,19 @@ curl -sS -X POST localhost:8081/v1/runs/9f2c…/approvals \
 # => {"approved":true}
 ```
 
-Approve by path instead, if you prefer: `POST /v1/runs/{id}/approvals/{step_id}`.
+**The decision lands in the audit ledger, and the run resumes.** Approving a
+held step flips its record from `deny` to `approve`, marks the key so the gate's
+re-check honours it (`internal/loop/approval.go:152`), and re-enters the loop
+through `runner.Resume` (`cmd/agentloop/main.go:218`, `:243`). Without that
+resume leg the run sat in `paused_approval` forever — that gap is closed.
 
-**What approving does — and does not do.** The decision lands in the audit
-ledger: step 0's record flips from `deny` to `approve` with reason `"operator
-approved"`. That is the whole effect. **The run does not resume.** `Run()`
-returned the moment the gate held (`internal/loop/runner.go:365` returns
-`result, nil`), so the stored result is still `paused_approval` with `steps: 0`
-and `spend_usd: 0`. Both approval handlers only record the decision and answer
-`{"approved":true}` (`cmd/agentloop/main.go:197`, `:211`) — neither re-invokes
-the loop, so the run never picks up again.
+Each `write_file` step holds on its own: the loop pauses again at the *next*
+write, not the same one, so a run with three writes costs three approvals. Both
+approval forms work: `POST /v1/runs/{id}/approvals` with a body, or
+`POST /v1/runs/{id}/approvals/{step_id}`.
 
-The resume *machinery* does exist: `prepareResume()` (`internal/loop/m4.go:36`)
-loads the run's checkpoint and sets the start step, and `Run()` calls it
-(`internal/loop/runner.go:268`). What is missing is the leg that connects an
-approval to it. And even re-invoked, the step would be denied once more:
-`CatApprove` records `deny` and holds on every pass
-(`internal/loop/approval.go:144`) and never consults an earlier approval.
-
-So operator approval today is a **record, not a resume**. Closing the loop means
-two small changes: have `Check` honor an existing approval for the same run and
-step, and re-invoke `Run()` from the checkpoint after `Approve` succeeds. See §9.
-
-> `make smoke` submits a run but does not approve it, so the run it creates sits
-> in `paused_approval`. That is the intended behavior, not a bug.
-
-## 4. HTTP API
+> `make smoke` submits a run but never approves it, so if that run reached a
+> write step it sits in `paused_approval`; a read-only goal finishes on its own.
 
 Requests accept `goal` (required), `context`, `max_steps`, and `cost_budget`.
 
@@ -177,15 +164,15 @@ Requests accept `goal` (required), `context`, `max_steps`, and `cost_budget`.
 | `GET` | `/v1/runs/{id}` | run result: state, exit reason, steps |
 | `POST` | `/v1/runs/{id}/kill` | sets state `killed` in the store (see §9: the live runner is not signalled) |
 | `GET` | `/v1/runs/{id}/events` | SSE stream: `event: step` …, `event: done` |
+| `POST` | `/v1/runs` | submit a run → `201` + `{run_id, state}` |
+| `GET` | `/v1/runs/{id}` | run result: state, exit reason, steps |
+| `POST` | `/v1/runs/{id}/kill` | stamp `killed` **and** signal the live runner (§9) |
+| `GET` | `/v1/runs/{id}/events` | SSE stream: `event: step` …, `event: done` |
 | `DELETE` | `/v1/runs/{id}` | forget a run → `204`, then `404` |
 | `DELETE` | `/v1/runs/{id}/memory` | erase a run's memory → `204`, then `404` |
 | `GET` | `/v1/runs/{id}/approvals` | pending approvals + current state |
 | `POST` | `/v1/runs/{id}/approvals` | approve by body `{"step_id":N}` |
 | `POST` | `/v1/runs/{id}/approvals/{step_id}` | approve by path |
-
-Admin / operator console:
-
-| Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/admin/api/v1/runs` | all runs as JSON |
 | `GET` | `/admin/api/v1/evals` | eval report |
@@ -282,30 +269,32 @@ Package map:
 
 Stated plainly, so nobody discovers it the hard way:
 
-- **Approval holds, and now resumes.** Both approval handlers call
-  `runner.Resume` after `gate.Approve` returns true, so an approved step
-  re-enters the loop from the checkpoint (`cmd/agentloop/main.go:245`, `:270`).
-  What is still narrow: `Categorize` matches only literal read-ish names
-  (`internal/loop/approval.go:27`), and none of the four v1 tool names match —
-  so *every* tool call fail-closes to `CatApprove`. A plain read-only `query`
-  step holds until an operator approves it.
-- **Synthesis is the only model call.** The loop now reaches onegw — once, at
-  the end of a bound run, through `internal/onegw`. Planning does **not**: the
-  planner is still the deterministic rule table, so a run's *steps* are chosen
-  without a model. A deploy with no gateway reachable behaves exactly as
-  before, because the deterministic partial remains the fallback.
+- **Approval holds, and resumes.** Both approval handlers call `runner.Resume`
+  after `gate.Approve` returns true, so an approved step re-enters the loop and
+  the gate's re-check honours the recorded key
+  (`internal/loop/approval.go:152`, `cmd/agentloop/main.go:218`, `:243`).
+- **Every `write_file` holds.** `Categorize` keeps the writer in `CatApprove`
+  deliberately (the function's comment says why): §7.3 wants irreversible writes
+  behind confirmation, and the runner's confidence signal is step success, not a
+  model's — so there is nothing for `auto_if_confident` to hang on yet.
+- **Synthesis is the only model call.** The loop reaches onegw once, at the end
+  of a bound run, through `internal/onegw`. Planning does **not**: the planner is
+  still the deterministic rule table, so a run's *steps* are chosen without a
+  model. A deploy with no gateway reachable behaves exactly as before, because
+  the deterministic partial remains the fallback.
+- **The kill endpoint reaches a live run.** `POST /v1/runs/{id}/kill` stamps the
+  stored state *and* signals the runner's kill channel, which `Run()` checks at
+  every step boundary. The stop is bounded by one step, not instant — a step
+  already in flight finishes first.
 - **The four tools are stubs.** `query` should reach LeanKG `POST /api/v1/query`;
   `run_tests`/`write_file` should go through xdev rpc in a restricted workspace.
-- **The kill endpoint reaches a live run.** `POST /v1/runs/{id}/kill` stamps the
-  stored state *and* signals the runner (`cmd/agentloop/main.go:167`, `:367`),
-  which checks the channel at every step boundary. The stop is bounded by one
-  step, not instant: a step already in flight runs to completion first.
 - **Tier routing is half-wired** — see §6.
 - **M7 is gated shut**, correctly: the gate is a measurement, not a milestone,
   and it opens only when a [PRD §10](PRD.md#10-multi-agent-stance) condition is
   actually met.
 
-In rough order: **a real LeanKG `query` client** (the tool is still a stub), a
-**model-driven planner** (the one call the loop makes today is the synthesis),
-then xdev-rpc execution for `run_tests`/`write_file`, and with it the tier
+In rough order: **a real LeanKG `query` client** (the tool is still a stub, so
+the steps above execute and read nothing), a **model-driven planner** (the one
+call the loop makes today is the synthesis), then
+xdev-rpc execution for `run_tests`/`write_file`, and with it the tier
 propagation of §6.

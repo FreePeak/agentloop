@@ -15,9 +15,11 @@ import (
 
 // TestM5_AutoCategoryReads proves P30 "read → auto":
 // read/search/list/get tools are approved immediately with
-// zero human interruption.
+// zero human interruption. The v1 tool names (PRD §4) are
+// included: the runner passes those, not the generic ones.
 func TestM5_AutoCategoryReads(t *testing.T) {
-	for _, tool := range []string{"read", "search", "list", "get"} {
+	for _, tool := range []string{"read", "search", "list", "get",
+		"query", "web_search", "run_tests"} {
 		gate := loop.NewApprovalGate()
 		got := gate.Check(loop.ApprovalRequest{
 			RunID:      "r",
@@ -150,20 +152,19 @@ func TestM5_RunnerPausesOnApproval(t *testing.T) {
 	}
 }
 
-// TestM5_InterruptionRate is the M5 acceptance:
-// the interrupt rate (denials that are not auto-approves)
-// must be <10% of all steps. With a mixed policy (reads
-// auto, everything else held), the natural interrupt rate
-// is bounded by the proportion of non-read tools — the
-// operator only sees the high-impact fraction.
+// TestM5_InterruptionRate is the M5 acceptance: the interrupt
+// rate (denials that are not auto-approves) must be <10% of all
+// steps. The mixed policy is the runner's real one — three
+// readers auto, one writer held — and the natural rate is the
+// proportion of write steps.
 func TestM5_InterruptionRate(t *testing.T) {
 	gate := loop.NewApprovalGate()
-	// Simulate 100 steps: 95 reads (auto-approve), 5 writes (held).
-	// With 5% high-impact tools, the interrupt rate is 5%,
-	// comfortably under the 10% ceiling (P30/P68).
+	// Simulate 100 steps: 95 read-category (auto-approve),
+	// 5 write_file (held). A 5% high-impact share sits under
+	// the 10% ceiling (P30/P68).
 	total := 100
 	for i := 0; i < total; i++ {
-		tool := "read"
+		tool := "query"
 		if i%20 == 0 {
 			tool = "write_file"
 		}

@@ -19,6 +19,13 @@ func TestCategorize(t *testing.T) {
 		{"search", CatAuto},
 		{"list", CatAuto},
 		{"get", CatAuto},
+		// The four v1 tool names (PRD §4). These are the ones the
+		// runner actually passes; the generic vocabulary above is
+		// kept for the shared policy table, not for the loop.
+		{"query", CatAuto},
+		{"web_search", CatAuto},
+		{"run_tests", CatAuto},
+		{"write_file", CatApprove},
 		{"update", CatConfirm},
 		{"edit", CatConfirm},
 		{"patch", CatConfirm},
