@@ -14,15 +14,17 @@ import (
 
 // fakeModel records what it was asked and returns a canned reply.
 type fakeModel struct {
-	gotMsgs []onegw.Message
-	reply   onegw.Reply
-	err     error
-	calls   int
+	gotMsgs  []onegw.Message
+	gotTiers []string
+	reply    onegw.Reply
+	err      error
+	calls    int
 }
 
-func (f *fakeModel) Chat(_ context.Context, msgs ...onegw.Message) (onegw.Reply, error) {
+func (f *fakeModel) ChatTier(_ context.Context, tier string, msgs ...onegw.Message) (onegw.Reply, error) {
 	f.calls++
 	f.gotMsgs = msgs
+	f.gotTiers = append(f.gotTiers, tier)
 	return f.reply, f.err
 }
 

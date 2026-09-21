@@ -9,11 +9,31 @@ import (
 )
 
 // ModelClient is the outbound model surface the loop needs — one call,
-// given conversation messages. internal/onegw.Client satisfies it; tests
-// use fakes. Kept deliberately this small: the loop must not grow a
-// gateway's job (retries, key pools, fallback), only consume one.
+// given conversation messages and the tier that should serve it.
+// internal/onegw.Client satisfies it; tests use fakes. Kept deliberately
+// this small: the loop must not grow a gateway's job (retries, key pools,
+// fallback), only consume one.
+//
+// The tier parameter is not decoration. Until it existed, the loop
+// computed a tier per step (M3) and never sent it, so "tiered routing"
+// was a field on the run record and nothing else.
 type ModelClient interface {
-	Chat(ctx context.Context, msgs ...onegw.Message) (onegw.Reply, error)
+	ChatTier(ctx context.Context, tier string, msgs ...onegw.Message) (onegw.Reply, error)
+}
+
+// Tierless adapts a client that only knows Chat, so a fake or an older
+// implementation still satisfies ModelClient. Tests use it; production
+// passes the real client, whose ChatTier routes.
+type Tierless struct {
+	C interface {
+		Chat(ctx context.Context, msgs ...onegw.Message) (onegw.Reply, error)
+	}
+}
+
+// ChatTier ignores the tier: this adapter exists precisely for clients
+// that cannot route.
+func (t Tierless) ChatTier(ctx context.Context, _ string, msgs ...onegw.Message) (onegw.Reply, error) {
+	return t.C.Chat(ctx, msgs...)
 }
 
 // synthesize replaces a bound-exit's deterministic partial with a real
@@ -26,13 +46,18 @@ type ModelClient interface {
 // Cost note: when the budget ceiling fires, this call is exactly what the
 // 10% pre-synthesis reserve exists to fund (PRD §17, budget.PreSynthReserve).
 func (r *LoopRunner) synthesize(ctx context.Context, result *RunResult) error {
+	// Every exit path calls this, so it is where the run's accumulated
+	// observations are finalised.
+	r.flushScreenErrors(result)
 	if r.model == nil {
 		result.PartialSynthesis = synthesizePartial(result.Steps)
 		return nil
 	}
 
 	prompt := buildSynthesisPrompt(r.cfg.Goal, *result)
-	reply, err := r.model.Chat(ctx,
+	// Synthesis is its own step type: a run that hit a bound wants a
+	// different model than the one driving the loop (PRD move 3).
+	reply, err := r.model.ChatTier(ctx, TierSynthesis,
 		onegw.Message{Role: "system", Content: synthesisSystemPrompt},
 		onegw.Message{Role: "user", Content: prompt},
 	)

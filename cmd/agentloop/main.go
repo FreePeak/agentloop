@@ -19,21 +19,14 @@ import (
 	"github.com/FreePeak/agentloop/internal/budget"
 	"github.com/FreePeak/agentloop/internal/eval"
 	"github.com/FreePeak/agentloop/internal/experiments"
+	"github.com/FreePeak/agentloop/internal/guardrail"
 	"github.com/FreePeak/agentloop/internal/leankg"
 	"github.com/FreePeak/agentloop/internal/loop"
 	"github.com/FreePeak/agentloop/internal/onegw"
 	"github.com/FreePeak/agentloop/internal/planner"
-	"github.com/FreePeak/agentloop/internal/systemone"
 	"github.com/FreePeak/agentloop/internal/tools"
 	"github.com/FreePeak/agentloop/internal/xdev"
 )
-
-// GuardrailClient is the loop's screening surface, redeclared here so the
-// server can hold one without importing the loop package's runner types.
-// internal/systemone.Client satisfies both this and loop.GuardrailClient.
-type GuardrailClient interface {
-	Screen(ctx context.Context, state any) (map[string]float64, float64, error)
-}
 
 // Server holds the in-memory run store, the runner/gate registry,
 // the tool registry, the M6 eval runner that gates deploys, and the
@@ -46,10 +39,10 @@ type Server struct {
 	tools      tools.ToolRegistry
 	evalRunner *eval.Runner
 	model      *onegw.Client
-	// screen is the System One guardrail transport (nil = screening off).
-	// One client shared by every run: it holds an HTTP connection pool,
-	// not per-run state.
-	screen GuardrailClient
+	// guardrail screens every message against the System One battery
+	// (§7.2). Nil means no screen is configured, which the run records as
+	// screen_errors rather than as a clean verdict.
+	guardrail *guardrail.Client
 	// sandboxDir is the workspace sandboxed turns run in; empty when no
 	// executor is configured.
 	sandboxDir string
@@ -85,8 +78,8 @@ func NewServer() *Server {
 			envOr("AGENTLOOP_ONEGW_URL", "http://127.0.0.1:8080"),
 			os.Getenv("AGENTLOOP_ONEGW_KEY"),
 			envOr("AGENTLOOP_ONEGW_COMBO", "dev"),
-		),
-		screen: systemoneFromEnv(),
+		).WithTiers(tiersFromEnv()),
+		guardrail: guardrailFromEnv(),
 		evalRunner: eval.NewRunner(func(cfg loop.RunnerConfig) (*loop.LoopRunner, *budget.Guard, tools.ToolRegistry, error) {
 			// Same runner the service builds, minus the model: the gate and
 			// the planner are part of what the cases exercise, so building a
@@ -112,6 +105,31 @@ func envOr(key, def string) string {
 	return def
 }
 
+// tiersFromEnv maps this loop's three routing tiers onto onegw combos.
+//
+// The gateway ships whatever combos an operator configured — in this
+// portfolio, exactly one (`dev`). Naming a combo here that does not exist
+// upstream is how "tiered routing" becomes an error instead of a saving,
+// so an unset tier simply falls through to AGENTLOOP_ONEGW_COMBO and the
+// loop still runs:
+//
+//	AGENTLOOP_ONEGW_COMBO_PLANNING   combo for plan/replan steps
+//	AGENTLOOP_ONEGW_COMBO_EXECUTION  combo for action steps (the hot path)
+//	AGENTLOOP_ONEGW_COMBO_SYNTHESIS  combo for the bound-exit answer
+func tiersFromEnv() map[string]string {
+	out := map[string]string{}
+	for tier, key := range map[string]string{
+		loop.TierPlanning:  "AGENTLOOP_ONEGW_COMBO_PLANNING",
+		loop.TierExecution: "AGENTLOOP_ONEGW_COMBO_EXECUTION",
+		loop.TierSynthesis: "AGENTLOOP_ONEGW_COMBO_SYNTHESIS",
+	} {
+		if v := os.Getenv(key); v != "" {
+			out[tier] = v
+		}
+	}
+	return out
+}
+
 // leankgFromEnv wires the code-graph client from the environment.
 //
 //	AGENTLOOP_LEANKG_URL   default http://127.0.0.1:8090
@@ -126,38 +144,61 @@ func leankgFromEnv() *leankg.Client {
 	return leankg.New(envOr("AGENTLOOP_LEANKG_URL", "http://127.0.0.1:8090"))
 }
 
-// systemoneFromEnv wires the System One guardrail transport from the
-// environment.
+// guardrailFromEnv builds the System One screening client.
 //
-//	AGENTLOOP_SYSTEMONE_URL    endpoint root; empty disables screening
-//	                           (default when set: onegw's root)
-//	AGENTLOOP_SYSTEMONE_KEY    bearer key; empty sends no Authorization
-//	                           header (what onegw and a local sidecar want)
-//	AGENTLOOP_SYSTEMONE_MODEL  evaluation model, default jev-latest
+//	AGENTLOOP_GUARDRAIL_URL    endpoint root (onegw, or TypeSafe / a Laya
+//	                           sidecar directly); unset means NO screen,
+//	                           and runs record that in screen_errors
+//	AGENTLOOP_GUARDRAIL_KEY    bearer key (Jev); a local Laya needs none
+//	AGENTLOOP_GUARDRAIL_MODEL  default jev-latest
 //
-// The URL is the whole backend choice, which is the point (PRD §4.3): point
-// it at onegw (http://127.0.0.1:8080) and it owns the combo, the fallback
-// chain and usage accounting; point it straight at a backend
-// (https://api.typesafe.ai for Jev, http://127.0.0.1:8091 for a local Laya
-// sidecar) and the same client screens without any code change.
-//
-// Screening is OFF until a URL is given, and off is not "pass": a run with
-// no screen has no verdicts recorded, so an operator reading a trajectory
-// can tell an unscreened deployment from a clean one. The alternative —
-// defaulting to a URL that is probably down — would turn every run into a
-// fail-closed exit.
-func systemoneFromEnv() GuardrailClient {
-	base := os.Getenv("AGENTLOOP_SYSTEMONE_URL")
-	if base == "" || os.Getenv("AGENTLOOP_SYSTEMONE_OFF") != "" {
+// There is deliberately no default URL: pointing the screen at a gateway
+// that does not serve /v1/systemone would turn every step into a failed
+// screen, and a run that is unscreened must say so rather than pretend.
+func guardrailFromEnv() *guardrail.Client {
+	url := os.Getenv("AGENTLOOP_GUARDRAIL_URL")
+	if url == "" {
 		return nil
 	}
-	return systemone.New(base, os.Getenv("AGENTLOOP_SYSTEMONE_KEY"),
-		os.Getenv("AGENTLOOP_SYSTEMONE_MODEL"))
+	return guardrail.New(url, os.Getenv("AGENTLOOP_GUARDRAIL_KEY"), os.Getenv("AGENTLOOP_GUARDRAIL_MODEL"))
+}
+
+// screenFunc adapts the client to the loop's screen hook. A nil client
+// yields nil, so the runner's "no screen configured" path is what runs —
+// not a screen that always passes.
+func (s *Server) screenFunc() loop.ScreenFunc {
+	if s.guardrail == nil {
+		return nil
+	}
+	return func(text string) (map[string]float64, float64, error) {
+		v, err := s.guardrail.Screen(context.Background(), text)
+		if err != nil {
+			return nil, 0, err
+		}
+		return v.Nouls, v.Severity, nil
+	}
+}
+
+// screenGoal judges the submitted goal before any step runs. It returns
+// the routed action ("pass"/"review"/"block") or an error when the screen
+// could not run — which the caller records rather than treating as clean.
+func (s *Server) screenGoal(goal string) (string, error) {
+	if s.guardrail == nil {
+		return "", nil
+	}
+	v, err := s.guardrail.Screen(context.Background(), goal)
+	if err != nil {
+		return "", err
+	}
+	return experiments.Route(v.Nouls, v.Severity, policyFromEnv()), nil
 }
 
 // policyFromEnv selects the guardrail threshold set (PRD §17): strict is the
-// measured default, permissive the operator-selectable alternative. An
+// measured default, permissive the operator-selectable alternative, and an
 // unrecognised value is strict — a typo must not silently loosen a screen.
+//
+// The battery is a constant (internal/guardrail.Questions); the thresholds
+// are the tunable, which is exactly what §17 says should be calibrated.
 func policyFromEnv() experiments.Policy {
 	if strings.EqualFold(os.Getenv("AGENTLOOP_GUARDRAIL_POLICY"), "permissive") {
 		return experiments.Permissive
@@ -248,13 +289,62 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) {
 		// The eval runner deliberately gets no model — the deploy gate
 		// must stay deterministic and offline.
 		Model: s.model,
-		// M2.x: every step boundary screens the tool result through
-		// System One. nil (no AGENTLOOP_SYSTEMONE_URL) leaves the loop
-		// unscreened rather than pretending a missing screen passed.
-		Guardrail: s.screen,
-		Policy:    policyFromEnv(),
+		// M2.x: the guardrail thresholds this run screens under (strict by
+		// default; AGENTLOOP_GUARDRAIL_POLICY selects permissive).
+		Policy: policyFromEnv(),
 	}
-	runner := loop.NewRunnerWithPlannerAndGate(cfg, guard, s.tools, planner.NewPlanner(), gate)
+	runner := loop.NewRunnerWithPlannerAndGate(cfg, guard, s.tools, planner.NewPlanner(), gate).
+		WithGuardrailScreen(s.screenFunc())
+
+	// Screen the GOAL before the loop takes a step (§7.2: "the model
+	// context is the injection surface" — the goal is the first thing that
+	// enters it). A block here is the run never starting, which is the
+	// correct outcome for an injection; a review holds it for a human.
+	if verdict, err := s.screenGoal(body.Goal); err != nil {
+		blocked := loop.RunResult{
+			RunID:        runID,
+			State:        loop.StateExhausted,
+			ExitReason:   loop.ExitGuardrailBlock,
+			ScreenErrors: []string{err.Error()},
+		}
+		blocked.Success = boolPtr(false)
+		s.mu.Lock()
+		s.runs[runID] = blocked
+		s.mu.Unlock()
+		// The run id must reach the caller even when the goal is blocked:
+		// a 201 with no body is a client that cannot look up what happened.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(w, map[string]any{"run_id": runID, "state": blocked.State, "exit_reason": blocked.ExitReason})
+		return
+	} else if verdict != "" && verdict != "pass" {
+		state := loop.StateExhausted
+		if verdict == "review" {
+			state = loop.StatePausedApproval
+		}
+		held := loop.RunResult{
+			RunID:      runID,
+			State:      state,
+			ExitReason: loop.ExitGuardrailBlock,
+			Steps: []loop.StepRecord{{
+				StepID: 0,
+				Phase:  "evaluate",
+				Tool:   "(goal screen)",
+				Why:    "guardrail: " + verdict,
+				Screens: []loop.ScreenResult{{
+					Hazard: "noul_battery", Action: verdict,
+				}},
+			}},
+		}
+		held.Success = boolPtr(false)
+		s.mu.Lock()
+		s.runs[runID] = held
+		s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(w, map[string]any{"run_id": runID, "state": held.State, "exit_reason": held.ExitReason})
+		return
+	}
 	s.mu.Lock()
 	s.runners[runID] = runner
 	s.gates[runID] = gate

@@ -4,6 +4,7 @@ package loop_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -191,16 +192,15 @@ func TestCase5_InjectionSafe(t *testing.T) {
 // is reachable and listed — no silent exit paths.
 func TestAllExitReasonsListed(t *testing.T) {
 	got := loop.AllExitReasons()
-	if len(got) != 10 {
-		t.Fatalf("AllExitReasons() returned %d items, want 10", len(got))
+	if len(got) != 9 {
+		t.Fatalf("AllExitReasons() returned %d items, want 9", len(got))
 	}
 	expected := map[string]bool{
 		"max_steps": false, "wall_clock": false, "cost_budget": false,
 		"daily_budget": false, "confidence_floor": false,
 		"progress_stall": false, "consecutive_failures": false,
-		"goal_met":              false,
-		"guardrail_block":       false,
-		"guardrail_unavailable": false,
+		"goal_met":        false,
+		"guardrail_block": false,
 	}
 	for _, r := range got {
 		if _, ok := expected[r.String()]; !ok {
@@ -227,8 +227,8 @@ func TestCase6_TypeSafeBlock(t *testing.T) {
 		WallClock: 10 * time.Second,
 		Goal:      "test",
 	}
-	screen := func(tool string, data any) (map[string]float64, float64) {
-		return map[string]float64{"jailbreak": 0.9}, 3.0
+	screen := func(text string) (map[string]float64, float64, error) {
+		return map[string]float64{"jailbreak": 0.9}, 3.0, nil
 	}
 	runner := loop.NewRunnerWithTypeSafeScreen(cfg, guard, reg, screen)
 	result, err := runner.Run(context.Background())
@@ -257,8 +257,8 @@ func TestCase7_TypeSafePass(t *testing.T) {
 		WallClock: 10 * time.Second,
 		Goal:      "test",
 	}
-	screen := func(tool string, data any) (map[string]float64, float64) {
-		return map[string]float64{"jailbreak": 0.1}, 1.0
+	screen := func(text string) (map[string]float64, float64, error) {
+		return map[string]float64{"jailbreak": 0.1}, 1.0, nil
 	}
 	runner := loop.NewRunnerWithTypeSafeScreen(cfg, guard, reg, screen)
 	result, err := runner.Run(context.Background())
@@ -268,4 +268,87 @@ func TestCase7_TypeSafePass(t *testing.T) {
 	if result.ExitReason == loop.ExitGuardrailBlock {
 		t.Error("ExitReason = guardrail_block, want normal exit")
 	}
+}
+
+// A screen that cannot run must be RECORDED, and must not stop the run.
+// Fail-closed would make an outage block every run; silent-pass would make
+// the containment claim false precisely when it matters. Recorded is the
+// only honest third option.
+func TestUnavailableScreenIsRecordedAndTheRunContinues(t *testing.T) {
+	guard := budget.New(100.0, 200.0)
+	reg := tools.NewRegistry()
+	cfg := loop.RunnerConfig{
+		RunID: "screen-down", MaxSteps: 3, WallClock: 10 * time.Second, Goal: "test",
+	}
+	screen := func(string) (map[string]float64, float64, error) {
+		return nil, 0, errScreenDown
+	}
+	runner := loop.NewRunnerWithTypeSafeScreen(cfg, guard, reg, screen)
+	result, err := runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if result.ExitReason == loop.ExitGuardrailBlock {
+		t.Error("an unavailable screen blocked the run — it must be an observation, not a verdict")
+	}
+	if len(result.ScreenErrors) == 0 {
+		t.Fatal("ScreenErrors is empty: a run that was never screened looks exactly like a clean one")
+	}
+	if !contains(result.ScreenErrors[0], "screen is down") {
+		t.Errorf("ScreenErrors = %v, want the reason", result.ScreenErrors)
+	}
+	// And the step records the unavailability next to the action.
+	found := false
+	for _, s := range result.Steps {
+		for _, sc := range s.Screens {
+			if sc.Action == "unavailable" && sc.Error != "" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("no step recorded the screen as unavailable")
+	}
+}
+
+// The screen judges the RESULT text, not the tool's name. A battery asked
+// about a name screens nothing.
+func TestScreenSeesTheResultText(t *testing.T) {
+	guard := budget.New(100.0, 200.0)
+	reg := tools.NewRegistry()
+	cfg := loop.RunnerConfig{
+		RunID: "screen-text", MaxSteps: 2, WallClock: 10 * time.Second, Goal: "test",
+	}
+	var seen []string
+	screen := func(text string) (map[string]float64, float64, error) {
+		seen = append(seen, text)
+		return map[string]float64{"jailbreak": 0.1}, 0.5, nil
+	}
+	runner := loop.NewRunnerWithTypeSafeScreen(cfg, guard, reg, screen)
+	if _, err := runner.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if len(seen) == 0 {
+		t.Fatal("the screen was never called")
+	}
+	for i, text := range seen {
+		if text == "" {
+			t.Errorf("call %d screened empty text", i)
+		}
+		// A tool name is not content to judge.
+		if text == "query" || text == "web_search" {
+			t.Errorf("call %d was handed a tool name (%q), not a result", i, text)
+		}
+	}
+}
+
+var errScreenDown = fmt.Errorf("screen is down")
+
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }

@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/FreePeak/agentloop/internal/experiments"
-	"github.com/FreePeak/agentloop/internal/systemone"
 )
 
 // The gateway is configured by environment, so this is the one place the
@@ -26,28 +25,27 @@ func TestNewServer_WiresModelFromEnv(t *testing.T) {
 	}
 }
 
-// The screen is the second outbound dependency configured by environment,
-// and it has one failure mode that matters: a deploy that believes it is
-// screening while nothing is wired. Off is the default and must stay off —
-// switching it on silently would fail-close every run against an endpoint
-// nobody configured.
-func TestNewServer_WiresSystemoneFromEnv(t *testing.T) {
-	if s := NewServer(); s.screen != nil {
-		t.Error("screen client is non-nil with no AGENTLOOP_SYSTEMONE_URL — runs would try to screen against nothing")
+// The guardrail client is wired by environment, and its one dangerous
+// failure mode is a deploy that believes it is screening while nothing is
+// wired. Unset must stay nil — the runner records screen_errors for that,
+// which is the difference between an unscreened run and a clean one.
+func TestNewServer_WiresGuardrailFromEnv(t *testing.T) {
+	if s := NewServer(); s.guardrail != nil {
+		t.Error("guardrail client is non-nil with no AGENTLOOP_GUARDRAIL_URL")
+	}
+	// No client means no screen function: the runner's "not configured"
+	// path, not a screen that always passes.
+	if fn := NewServer().screenFunc(); fn != nil {
+		t.Error("screenFunc is non-nil with no guardrail client — every run would claim to be screened")
 	}
 
-	t.Setenv("AGENTLOOP_SYSTEMONE_URL", "http://127.0.0.1:8080")
-	t.Setenv("AGENTLOOP_SYSTEMONE_MODEL", "jev-1.13.0")
+	t.Setenv("AGENTLOOP_GUARDRAIL_URL", "http://127.0.0.1:8080")
 	s := NewServer()
-	if s.screen == nil {
-		t.Fatal("screen client is nil with AGENTLOOP_SYSTEMONE_URL set")
+	if s.guardrail == nil {
+		t.Fatal("guardrail client is nil with AGENTLOOP_GUARDRAIL_URL set")
 	}
-	c, ok := s.screen.(*systemone.Client)
-	if !ok {
-		t.Fatalf("screen client is %T, want *systemone.Client", s.screen)
-	}
-	if c.Model() != "jev-1.13.0" {
-		t.Errorf("model = %q, want the env override", c.Model())
+	if s.screenFunc() == nil {
+		t.Error("screenFunc is nil with a guardrail client configured")
 	}
 }
 
