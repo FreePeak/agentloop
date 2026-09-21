@@ -1,5 +1,5 @@
 // Package tools provides the default in-memory ToolRegistry
-// implementation holding the 5 v1 tools. In production the
+// implementation holding the 4 v1 tools. In production the
 // registry's Execute routes through AgentBase.execute(tool, args)
 // (PRD §4.3 — agentloop owns the loop, xdev owns the turn).
 package tools
@@ -10,7 +10,7 @@ import (
 	"context"
 )
 
-// Registry is an in-memory ToolRegistry pre-loaded with the 5 v1 tools.
+// Registry is an in-memory ToolRegistry pre-loaded with the 4 v1 tools.
 type Registry struct {
 	Tools []Tool
 }
@@ -37,22 +37,31 @@ func (r *Registry) Validate(name string, args map[string]any) error {
 	return fmt.Errorf("unknown tool: %s", name)
 }
 
-// Execute runs one of the 5 v1 tools. For M1 each stub returns a
+// Execute runs one of the 4 v1 tools. For M1 each stub returns a
 // typed ToolResult with Success=true — the real execution path is
 // xdev rpc (tools 4-5) or LeanKG HTTP (tools 1-2) per PRD §4.
 func (r *Registry) Execute(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 	switch name {
-	case "repo_search":
+	case "query":
+		// LeanKG POST /api/v1/query. Empty action = the L1→L3 ladder;
+		// action pins a rung or asks a graph verb. The rung that answered
+		// rides back in Metadata so the loop can see which layer held.
+		action, _ := args["action"].(string)
+		rung, reason := "L3", "semantic"
+		switch action {
+		case "search", "exact", "fuzzy":
+			rung, reason = "L1", "exact-identifier"
+			if action == "fuzzy" {
+				rung, reason = "L2", "keyword"
+			}
+		case "semantic":
+			rung, reason = "L3", "semantic"
+		}
 		return ToolResult{
 			Success:  true,
-			Data:     map[string]any{"matches": []any{}, "rung": "L2", "reason": "keyword"},
-			Metadata: map[string]string{"retrieval_rung": "L2", "freshness": "ok"},
-		}, nil
-	case "repo_context":
-		return ToolResult{
-			Success:  true,
-			Data:     map[string]any{"context": "", "verb": "context"},
-			Metadata: map[string]string{"extraction": "ast"},
+			Data:     map[string]any{"matches": []any{}, "action": action, "rung": rung, "reason": reason},
+			Metadata: map[string]string{"retrieval_rung": rung, "freshness": "ok"},
+			Message:  "stub: query results would come from LeanKG POST /api/v1/query",
 		}, nil
 	case "web_search":
 		return ToolResult{

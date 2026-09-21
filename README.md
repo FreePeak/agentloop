@@ -32,8 +32,8 @@ curl -sS -X POST localhost:8081/v1/runs -H 'Content-Type: application/json' \
 curl -sS localhost:8081/v1/runs/<run_id>       # => "paused_approval"
 ```
 
-That pause is the gate working: the v1 tool set is read-only (`repo_search`,
-`repo_context`, `web_search`, `run_tests`) plus `write_file` (CatConfirm), so a
+That pause is the gate working: the v1 tool set is read-only (`query`,
+`web_search`, `run_tests`) plus `write_file` (CatConfirm), so a
 run that never asks for a delete/send/deploy never holds. Approving a held step
 **resumes the run** — the resume path is wired (M5), so the run continues past
 the approved step instead of staying `paused_approval`. Full walkthrough — API,

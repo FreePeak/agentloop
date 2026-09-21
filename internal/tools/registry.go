@@ -83,24 +83,21 @@ func canonical(v any) any {
 // directly in this file.
 var _ = json.Marshal
 
-// DefaultTools is the v1 tool surface — 5 tools over LeanKG and xdev
+// DefaultTools is the v1 tool surface — 4 tools over LeanKG and xdev
 // (PRD §4). Each entry is a description with a USE WHEN and a DO NOT USE WHEN.
+//
+// The LeanKG side is ONE tool, mirroring the server's own contract 1:1:
+// import / query / status, with retrieval layers (L1 exact → L2 fuzzy →
+// L3 semantic) and graph verbs living INSIDE query rather than spread
+// across tools. Two earlier names (repo_search, repo_context) were renames
+// of that single endpoint and made the surface look larger than LeanKG is.
 var DefaultTools = []Tool{
 	{
-		Name:         "repo_search",
-		Description:  "Search the codebase by keyword, element, or semantic query. Returns ranked matches with retrieval rung and freshness.",
-		UseWhen:      "When you need to find where something is defined, referenced, or discussed in the repo.",
-		DoNotUseWhen: "When you already know the file and line — use repo_context instead.",
-		Schema:       json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
-		TimeoutMs:    30000,
-		Sandboxed:    false,
-	},
-	{
-		Name:         "repo_context",
-		Description:  "Get AST-aware context around an element: callers, callees, impact, file context. Extracts context at the AST level, not file dumps.",
-		UseWhen:      "When you have a resolved element and need its neighbourhood — before writing code or reviewing.",
-		DoNotUseWhen: "When you don't know which element to ask about — use repo_search first.",
-		Schema:       json.RawMessage(`{"type":"object","properties":{"element":{"type":"string"},"verb":{"type":"string","enum":["context","impact","callers","callees"]}},"required":["element","verb"]}`),
+		Name:         "query",
+		Description:  "Query the code graph. Retrieval ladder (empty action): L1 exact identifier → L2 fuzzy keyword → L3 semantic. Or pin a rung with action search/fuzzy/semantic, or ask a graph verb with action context/impact/callers/callees/explain. Returns ranked matches with the retrieval rung that answered and freshness.",
+		UseWhen:      "When you need to find where something is defined, referenced, or discussed; or when you have a resolved element and need its neighbourhood before writing or reviewing.",
+		DoNotUseWhen: "To read a whole file — use write_file's read twin. To check what is indexed — use status.",
+		Schema:       json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"action":{"type":"string","enum":["","search","element","fuzzy","semantic","context","impact","callers","callees","explain"]},"to":{"type":"string"}},"required":["query"]}`),
 		TimeoutMs:    30000,
 		Sandboxed:    false,
 	},
@@ -108,7 +105,7 @@ var DefaultTools = []Tool{
 		Name:         "web_search",
 		Description:  "Search the web via onegw provider kind=searxng. Results come back pre-formatted.",
 		UseWhen:      "When you need current information not in the repo — versions, docs, APIs.",
-		DoNotUseWhen: "For anything already in the repo — use repo_search instead.",
+		DoNotUseWhen: "For anything already in the repo — use query instead.",
 		Schema:       json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
 		TimeoutMs:    30000,
 		Sandboxed:    false,
@@ -126,7 +123,7 @@ var DefaultTools = []Tool{
 		Name:         "write_file",
 		Description:  "Write or modify a file in the restricted xdev sandbox workspace. Approval-gated for irreversible actions.",
 		UseWhen:      "When you need to create or edit a file as a result of a loop step.",
-		DoNotUseWhen: "To read a file — use repo_context (read twin). Never to delete without approval.",
+		DoNotUseWhen: "To read a file — the read twin is `query` (in v1). Never to delete without approval.",
 		Schema:       json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`),
 		TimeoutMs:    30000,
 		Sandboxed:    true,

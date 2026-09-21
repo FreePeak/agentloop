@@ -35,7 +35,7 @@ func (r *rejectingOnceReviewer) Accept(t Task, outcome string) (bool, string) {
 func testRoster(t *testing.T) *RoleRoster {
 	t.Helper()
 	r, err := NewRoster(
-		RoleCard{Name: "researcher", Model: TierExecution, Tools: []string{"repo_search", "web_search"},
+		RoleCard{Name: "researcher", Model: TierExecution, Tools: []string{"query", "web_search"},
 			Prompt: "find facts", Input: "question", Output: "findings", OnFail: FailEscalate, MaxSteps: 4},
 		RoleCard{Name: "writer", Model: TierPlanning, Tools: []string{"write_file"},
 			Prompt: "compose", Input: "findings", Output: "draft", OnFail: FailRetry, MaxSteps: 3},
@@ -244,7 +244,7 @@ func TestSupervisor_FailureBehaviors(t *testing.T) {
 
 	// escalate: the failure becomes a question on the bus, run continues.
 	roster2, err := NewRoster(RoleCard{Name: "researcher", Model: TierExecution,
-		Tools: []string{"repo_search"}, OnFail: FailEscalate})
+		Tools: []string{"query"}, OnFail: FailEscalate})
 	if err != nil {
 		t.Fatalf("NewRoster: %v", err)
 	}

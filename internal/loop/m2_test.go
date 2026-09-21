@@ -36,7 +36,7 @@ func TestM2_TracerWiredInRun(t *testing.T) {
 	tr := tracer.New()
 	// Use different tools per step to avoid idempotency skip/cycle.
 	runner := newRunnerForTrace(t, 3, tr, func(step int, cfg loop.RunnerConfig) (string, map[string]any) {
-		tools := []string{"repo_search", "web_search", "repo_context"}
+		tools := []string{"query", "web_search", "run_tests"}
 		name := tools[step%len(tools)]
 		return name, map[string]any{"q": name, "step": step}
 	})
@@ -114,7 +114,7 @@ func TestM2_CycleAlertFired(t *testing.T) {
 // Layer 3: injected fault (budget exceeded at step 0).
 func TestM2_ThreeLayerRepetition(t *testing.T) {
 	basePick := func(step int, cfg loop.RunnerConfig) (string, map[string]any) {
-		tools := []string{"repo_search", "web_search", "repo_context"}
+		tools := []string{"query", "web_search", "run_tests"}
 		name := tools[step%len(tools)]
 		return name, map[string]any{"q": name, "step": step}
 	}
@@ -174,7 +174,7 @@ func TestM2_ThreeLayerRepetition(t *testing.T) {
 func TestM2_ValidateOnCleanTrace(t *testing.T) {
 	tr := tracer.New()
 	toolPick := func(step int, cfg loop.RunnerConfig) (string, map[string]any) {
-		tools := []string{"repo_search", "web_search", "repo_context"}
+		tools := []string{"query", "web_search", "run_tests"}
 		name := tools[step%len(tools)]
 		return name, map[string]any{"q": name, "step": step}
 	}
@@ -206,7 +206,7 @@ func TestM2_KillSwitchRecordsSpan(t *testing.T) {
 		if step == 0 {
 			time.Sleep(50 * time.Millisecond)
 		}
-		return "repo_search", map[string]any{"step": step}
+		return "query", map[string]any{"step": step}
 	})
 
 	go func() {
@@ -238,7 +238,7 @@ func TestM2_KillSwitchRecordsSpan(t *testing.T) {
 // has a different trace shape than a normal run (fault detection).
 func TestM2_BudgetFaultDiffers(t *testing.T) {
 	pick := func(step int, cfg loop.RunnerConfig) (string, map[string]any) {
-		tools := []string{"repo_search", "web_search", "repo_context"}
+		tools := []string{"query", "web_search", "run_tests"}
 		name := tools[step%len(tools)]
 		return name, map[string]any{"q": name, "step": step}
 	}

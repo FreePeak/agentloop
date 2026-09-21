@@ -131,11 +131,10 @@ Rules (Ch.6, `design.md` §5): typed envelope `ToolResult(success, data, message
 
 | # | Tool | Backing surface | Write? | Notes |
 |---|---|---|---|---|
-| 1 | `repo_search` | LeanKG `POST /api/v1/query` (`action` empty = L0→L3 ladder, or `search`/`element`/`fuzzy`/`semantic`) | read | `retrieval{rung,reason}` + freshness ride back in the result metadata |
-| 2 | `repo_context` | LeanKG graph verbs `context`, `impact`, `callers`, `callees` (relative to a resolved element) | read | the AST-aware context-budget extractor (Ch.14: "AST-level extraction cuts context 60–80%") |
-| 3 | `web_search` | onegw provider `kind = "searxng"` (`<name>/query`) | read | no separate search integration; results come back pre-formatted |
-| 4 | `run_tests` | `xdev rpc` (JSONL over stdio) running in a **restricted** `--add-dir` workspace | **yes** (sandboxed) | the verification half of the write-test-fix loop (Ch.14, ≤3 attempts); never a raw shell tool in v1 |
-| 5 | `write_file` | `xdev rpc` file tools | **yes** | read twin = `repo_context`; approval gate by policy (§7.3); idempotency key on every call (§4.2) |
+| 1 | `query` | LeanKG `POST /api/v1/query` — **one tool for the whole graph**, mirroring the server's own contract: `action` empty runs the L1→L3 ladder (exact identifier → fuzzy keyword → semantic), `action` pins a rung (`search`/`element`/`fuzzy`/`semantic`) or asks a graph verb (`context`/`impact`/`callers`/`callees`/`explain`) | read | the layers live *inside* the tool, not in tool names — `retrieval{rung,reason}` + freshness ride back in the result metadata. Two earlier names (`repo_search`, `repo_context`) were renames of this one endpoint and made the surface look larger than LeanKG is |
+| 2 | `web_search` | onegw provider `kind = "searxng"` (`<name>/query`) | read | no separate search integration; results come back pre-formatted |
+| 3 | `run_tests` | `xdev rpc` (JSONL over stdio) running in a **restricted** `--add-dir` workspace | **yes** (sandboxed) | the verification half of the write-test-fix loop (Ch.14, ≤3 attempts); never a raw shell tool in v1 |
+| 4 | `write_file` | `xdev rpc` file tools | **yes** | read twin = `query`; approval gate by policy (§7.3); idempotency key on every call (§4.2) |
 
 **Divergence from `design.md` §18, stated on purpose:** `design.md`'s starting set is *"3 reads + 1 search + 1 ticket/incident writer"*. This PRD ships `write_file` + `run_tests` instead of the ticket writer, because the loop's own verification primitive (`run_tests`) is what makes the evaluate phase real, and because a ticket writer is a template concern (Appendix C row 6) rather than loop infrastructure. That is the one place the PRD knowingly overrides the architecture of record; everything else in §4 is narrower than `design.md`, not different from it.
 
@@ -149,7 +148,7 @@ xdev is the harness this very session runs in; its `rpc` mode is documented as t
 
 **Alignment policy:** xdev's own model may be onegw-routed — including *through agentloop's* tier combos. That is allowed and useful for dogfooding, but the PRD makes one rule explicit: **agentloop never loops xdev's loop.** agentloop drives xdev only as (a) a tool executor and (b) an editor for a single already-planned step; it never delegates an unbounded goal. Loop count stays 1, and `max_steps` semantics stay agentloop's.
 
-**MCP boundary rule:** tools are agentloop-owned wherever "own" is cheap — the first two LeanKG tools are plain HTTP clients over `POST /api/v1/query` with **no MCP client in the request path**. MCP client support (Agent. B P16–P30) is a v2 registry extension; it is also the likeliest place a hung child process stalls a loop, so it will ship behind the same watchdog and timeout the tool registry already gives HTTP tools.
+**MCP boundary rule:** tools are agentloop-owned wherever "own" is cheap — the LeanKG tool is a plain HTTP client over `POST /api/v1/query` with **no MCP client in the request path**. MCP client support (Agent. B P16–P30) is a v2 registry extension; it is also the likeliest place a hung child process stalls a loop, so it will ship behind the same watchdog and timeout the tool registry already gives HTTP tools.
 
 ### 4.2 Two idempotency layers, one record of truth
 
@@ -572,7 +571,7 @@ The book ships eight copy-paste architectures in App. G. They are **not** a v1 d
 | 1 · Customer Support | 5 / $0.05, escalation at 0.7 | 3 | first external tenant with a KB | classify → retrieve (KB) → answer or escalate; P68 confidence routes to a human |
 | 2 · Data Analysis | 8 / $0.30, `query_timeout` 30 s, `max_rows` 100 | 3 | first analytics question worth answering in SQL | schema → read-only SELECT → plain-language result with caveats; read-only by construction (§7.3) |
 | 3 · Content Generation | 6 / $0.20, quality gate 0.85 | 4 | a real publishing workflow | generate → self-critique to ≥0.85 → revise; P61/P62, capped at 2 rounds |
-| 4 · Code Review | 10 / $0.50, ≤20 files | 4 | **first real template** — after the M6 suite exists (the one gate for all templates) | diff → `repo_context` impact → findings with line numbers → comment; verify, don't generate (Ch.14) |
+| 4 · Code Review | 10 / $0.50, ≤20 files | 4 | **first real template** — after the M6 suite exists (the one gate for all templates) | diff → `query` graph verb (impact) → findings with line numbers → comment; verify, don't generate (Ch.14) |
 | 5 · Scheduling | 6 / $0.03, `create_event` requires confirmation | 3 | a calendar surface exists | availability → propose → **confirm → write**; the purest P30/P62 case |
 | 6 · Monitoring & Alerting | 8 / $0.40, auto-escalate at 300 s | 5 | on-call handoff is wanted | alert → metrics/logs → severity → mitigation or incident; P75 must work under load (§11.2 case 4) |
 | 7 · Document Processing | 5 / $0.08, confidence 0.90, review queue | 5 | invoice/contract volume justifies it | classify → extract → validate → route; below 0.90 confidence goes to `needs_review` |
@@ -606,7 +605,7 @@ Grouped by what they protect, each one pointing at where it is tested:
 | P6 Backoff Loop, P13 Warmup Loop, P14 Cooldown Loop | the retry ladder and tier routing already cover the cases we have | a measured error class the ladder mishandles |
 | P7 Priority Loop, P9 Timeout Guard, P10 Nested Loop | single-workload v1; per-tool timeouts exist, sub-task budgets do not | first multi-difficulty queue; first decomposed sub-budget |
 | P18 Tool Composition | the planner already sequences tools better than a static pipeline | a predictable 3+ tool sequence repeated across runs |
-| P25 Read-Only First, P27 Tool Versioning, P35 Episodic Memory, P36 Working Memory Buffer | `write_file` is approval-gated and twin'd with `repo_context`; five tools do not need version negotiation | a breaking tool change; the first recurring task family |
+| P25 Read-Only First, P27 Tool Versioning, P35 Episodic Memory, P36 Working Memory Buffer | `write_file` is approval-gated and twin'd with `query`; four tools do not need version negotiation | a breaking tool change; the first recurring task family |
 | P37 Preference Store, P38 Fact Cache | needs real multi-user traffic to be worth storage | first repeat tenant with stable facts |
 | P41 Shared Memory, P44 State Validation | single agent; typed state already validated at the boundary | M7, and the first corrupted-state incident |
 | P47–P60 (multi-agent band) | §10's gate is shut on purpose | 10+ tools, mixed tiers, genuine parallelism, or context beyond one window |
@@ -635,7 +634,7 @@ The chapter's loop is **write code → run tests → fix failures → repeat, �
 |---|---|---|
 | Write-test-fix with a hard 3-attempt cap | a **cycle budget per sub-goal**, not just a per-run step ceiling | gap → §9 invariant 1 (no progress = no spend) covers the failure; the cap itself is a v1 config (`max_attempts`) and must be in the code, not only the prompt |
 | Search before read; never load the repo | the 70% context rule plus retrieval over a real graph (§3.1, P33) | **already in v1** |
-| AST-level extraction, not file dumps | LeanKG `context` verb returning an element's AST-aware neighbourhood | **already in v1** (`repo_context`, §4) |
+| AST-level extraction, not file dumps | LeanKG `context` verb returning an element's AST-aware neighbourhood | **already in v1** (`query`'s `context` action, §4) |
 | `run_tests` in a sandbox | a write tool with a restricted workspace and a typed result | **already in v1** (tool 4) |
 | Verify the edit, not the intention | the evaluate phase must run the test result through a predicate before the loop continues | **already an invariant** (§9, invariant 2) |
 
@@ -714,7 +713,7 @@ Written the way an unfriendly reviewer would write it, then answered. Every find
 
 **Non-negotiables (the two unconditional patterns).** A bounded loop (**P1**) and a kill switch (**P75**) are M1's definition, not hardening. Six exits, typed: step, wall-clock, dollar, confidence floor, progress stall, consecutive failures. Success and stopping are separate fields on every run.
 
-**Shape.** Router (cheap) → Planner (strong) → Executor (ReAct, one tool call per turn, guards) → Evaluate (predicated) → memory write; one writer per `(run, resource)`; read-only fan-out. Five tools at v1 (`repo_search`, `repo_context`, `web_search`, `run_tests`, `write_file`) over LeanKG and xdev. Models and token saving go through onegw; enforcement stays in agentloop (§4.3).
+**Shape.** Router (cheap) → Planner (strong) → Executor (ReAct, one tool call per turn, guards) → Evaluate (predicated) → memory write; one writer per `(run, resource)`; read-only fan-out. Four tools at v1 (`query`, `web_search`, `run_tests`, `write_file`) over LeanKG and xdev. Models and token saving go through onegw; enforcement stays in agentloop (§4.3).
 
 **Numbers** (all priors, all in §17, none of them specs): 9 steps · 120 s · $1.00/run · 90% forced synthesis · 70% context ceiling · compress every 5 · 2,000-token results · 3 identical `(tool,args)` = cycle · retry 3 with jitter, never a write or a 400 · CB 5/60 s/2 · eval pass 0.8 + latency + cost caps · <10% interrupts · 90-day traces.
 
