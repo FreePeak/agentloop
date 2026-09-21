@@ -68,8 +68,15 @@ func NewServer() *Server {
 			envOr("AGENTLOOP_ONEGW_COMBO", "dev"),
 		),
 		evalRunner: eval.NewRunner(func(cfg loop.RunnerConfig) (*loop.LoopRunner, *budget.Guard, tools.ToolRegistry, error) {
+			// Same runner the service builds, minus the model: the gate and
+			// the planner are part of what the cases exercise, so building a
+			// bare runner here made the adversarial case unscoreable — no
+			// gate means no pause, and a pause is its whole premise.
 			g := budget.New(cfg.CostBudget, float64(loop.DailyCeilingMult)*cfg.CostBudget)
-			return loop.NewRunner(cfg, g, tools.NewRegistry()), g, tools.NewRegistry(), nil
+			reg := tools.NewRegistry()
+			gate := loop.NewApprovalGate()
+			cfg.Gate = gate
+			return loop.NewRunnerWithPlannerAndGate(cfg, g, reg, planner.NewPlanner(), gate), g, reg, nil
 		}),
 	}
 }
