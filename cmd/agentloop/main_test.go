@@ -289,6 +289,7 @@ type RunResultResponse struct {
 		Args   map[string]any `json:"args"`
 		Why    string         `json:"why"`
 	} `json:"steps"`
+	ScreenErrors []string `json:"screen_errors,omitempty"`
 }
 
 // TestM6_EvalSuite runs 4 eval cases across all categories

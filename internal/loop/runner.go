@@ -29,7 +29,22 @@ type ScreenResult struct {
 	Hazard string  `json:"hazard"`
 	Prob   float64 `json:"prob"`
 	Action string  `json:"action"` // pass | review | block
+	// Error is set when the screen could not run. It is recorded ON the
+	// step rather than swallowed, because an outage must not read as a
+	// clean verdict — that is the difference between a containment layer
+	// and a decoration.
+	Error     string `json:"error,omitempty"`
+	Model     string `json:"model,omitempty"`
+	LatencyMs int64  `json:"latency_ms,omitempty"`
 }
+
+// ScreenFunc judges one message. It returns per-hazard probabilities and a
+// severity score, or an error when the battery could not run.
+//
+// The error return is not optional hygiene: the previous signature had no
+// way to say "the screen failed", so a caller could only either lie
+// (return zeros, meaning everything is clean) or drop the screen entirely.
+type ScreenFunc func(text string) (nouls map[string]float64, severity float64, err error)
 
 // StepRecord is one tool call within a run.
 type StepRecord struct {
@@ -76,7 +91,11 @@ type RunResult struct {
 	// going on the deterministic rotation, and the trajectory says why it
 	// had to — a silent fallback is how a run looks "fine" while the
 	// model is unreachable.
-	ReasonErrors   []string `json:"reason_errors,omitempty"`
+	ReasonErrors []string `json:"reason_errors,omitempty"`
+	// ScreenErrors records steps whose guardrail screen could not run
+	// (§7.2). Distinct from "no hazard found": a run with screen errors was
+	// not screened, and saying so is the whole point of the field.
+	ScreenErrors   []string `json:"screen_errors,omitempty"`
 	AnsweredBy     string   `json:"answered_by,omitempty"`
 	SynthesisError string   `json:"synthesis_error,omitempty"`
 }
@@ -116,20 +135,24 @@ type LoopRunner struct {
 	bestConfidence      float64
 	currentConfidence   float64
 	nextToolFn          func(int, RunnerConfig) (string, map[string]any)
-	tracer              *tracer.Tracer                                  // optional: nested span tracing (M2)
-	cycleAlert          func(string)                                    // optional: called on cycle detection (M2)
-	planner             *planner.Planner                                // optional: drives tool selection (M3)
-	plan                *planner.Plan                                   // current plan (M3)
-	gate                *ApprovalGate                                   // M5: fail-closed HITL gate (nil = bypass, tests)
-	model               ModelClient                                     // M8: outbound model transport (nil = deterministic synthesis)
-	guardrailScreen     func(string, any) (map[string]float64, float64) // M2.x: TypeSafe screen
-	pausedStep          int                                             // step held at paused_approval (M5)
+	tracer              *tracer.Tracer   // optional: nested span tracing (M2)
+	cycleAlert          func(string)     // optional: called on cycle detection (M2)
+	planner             *planner.Planner // optional: drives tool selection (M3)
+	plan                *planner.Plan    // current plan (M3)
+	gate                *ApprovalGate    // M5: fail-closed HITL gate (nil = bypass, tests)
+	model               ModelClient      // M8: outbound model transport (nil = deterministic synthesis)
+	guardrailScreen     ScreenFunc       // M2.x: TypeSafe Noul/Score screen (nil = no screen configured)
+	pausedStep          int              // step held at paused_approval (M5)
 	// heldChoice is the decision already made for the held step. Resume
 	// replays it rather than re-asking the model: a second call can choose
 	// a DIFFERENT tool, which would run something the operator never saw,
 	// under an approval for something else. Cost is the smaller reason.
 	heldChoice *StepChoice
-	lastResult RunResult // partial result at pause (M5 resume)
+	// screenErrors records each step whose guardrail screen could not run.
+	// Surfaced on the run so an operator can tell "nothing was flagged"
+	// from "nothing was checked".
+	screenErrors []string
+	lastResult   RunResult // partial result at pause (M5 resume)
 }
 
 // NewRunner returns a LoopRunner for the given config.
@@ -198,13 +221,25 @@ func NewRunnerWithApprovalGate(cfg RunnerConfig, guard *budget.Guard, reg tools.
 	return newRunner(cfg, guard, reg, toolPick, nil, nil, nil, nil, gate)
 }
 
-// NewRunnerWithTypeSafeScreen returns a LoopRunner with a
-// guardrail screening function (M2.x: TypeSafe). The function
-// produces Noul scores from a tool result; Route() decides
-// block/review/pass at each step boundary.
+// NewRunnerWithTypeSafeScreen returns a LoopRunner with a guardrail
+// screening function (M2.x, §7.2): every tool result before it reaches the
+// model, and the model's reply before it reaches the operator, is judged
+// and Route() decides pass/review/block at the step boundary.
+//
+// The picker is nil, not nextToolDefault, for the same reason
+// NewRunnerWithPlannerAndGate's is: a non-nil picker wins over the
+// reasoner, so passing the rotation here would make the model unreachable.
 func NewRunnerWithTypeSafeScreen(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
-	screen func(string, any) (map[string]float64, float64)) *LoopRunner {
-	r := newRunner(cfg, guard, reg, nextToolDefault, nil, nil, nil, nil, nil)
+	screen ScreenFunc) *LoopRunner {
+	r := newRunner(cfg, guard, reg, nil, nil, nil, nil, nil, nil)
+	r.guardrailScreen = screen
+	return r
+}
+
+// WithGuardrailScreen attaches a screen to an already-built runner. It is
+// how the service composes the screen with the planner, the gate and the
+// reasoner without a constructor per combination.
+func (r *LoopRunner) WithGuardrailScreen(screen ScreenFunc) *LoopRunner {
 	r.guardrailScreen = screen
 	return r
 }
@@ -577,8 +612,36 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 
 		// --- M2.x: TypeSafe guardrail screen ---
 		if r.guardrailScreen != nil {
-			nouls, sev := r.guardrailScreen(toolName, tr.Data)
-			action := experiments.Route(nouls, sev, experiments.Strict)
+			// Screen the tool result before it can reach the model (§7.2:
+			// "the model context is the injection surface"). The text under
+			// judgement is the rendered result, not the tool name — a
+			// battery asked about a name screens nothing.
+			screenText := renderResult(tr.Data)
+			nouls, sev, serr := r.guardrailScreen(screenText)
+			sr := ScreenResult{Hazard: "noul_battery", Prob: sev}
+
+			if serr != nil {
+				// A screen that could not run is recorded as such and the
+				// step continues. Fail-closed here would mean an outage
+				// blocks every run; silent-pass would mean the containment
+				// claim is false exactly when it matters. Recorded is the
+				// only honest third option.
+				sr.Action = "unavailable"
+				sr.Error = serr.Error()
+				if len(result.Steps) > 0 {
+					result.Steps[len(result.Steps)-1].Screens = append(result.Steps[len(result.Steps)-1].Screens, sr)
+				}
+				r.screenErrors = append(r.screenErrors, fmt.Sprintf("step %d: %v", step, serr))
+			} else {
+				action := experiments.Route(nouls, sev, experiments.Strict)
+				sr.Action = action
+				if len(result.Steps) > 0 {
+					result.Steps[len(result.Steps)-1].Screens = append(result.Steps[len(result.Steps)-1].Screens, sr)
+				}
+				_ = nouls
+			}
+			action := sr.Action
+			_ = nouls
 			if action == "review" {
 				result.State = StatePausedApproval
 				_ = r.synthesize(ctx, &result)
@@ -596,14 +659,9 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 				r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("guardrail: blocked"))
 				return result, nil
 			}
-			// Record non-block screen result on the step (ponytail: ceiling — only pass/review/block recorded; upgrade path: store full Noul battery payload).
-			if len(result.Steps) > 0 {
-				result.Steps[len(result.Steps)-1].Screens = append(result.Steps[len(result.Steps)-1].Screens, ScreenResult{
-					Hazard: "noul_battery",
-					Prob:   sev,
-					Action: action,
-				})
-			}
+			// ponytail: ceiling — the step records the routed action plus the
+			// severity, not the full per-hazard battery. Upgrade path: keep
+			// nouls in ScreenResult when the console needs the breakdown.
 		}
 
 		if err != nil || !tr.Success {
@@ -691,6 +749,16 @@ func (r *LoopRunner) endRunSpan(runID string, result RunResult, runErr error) {
 		err = runErr
 	}
 	r.tracer.EndSpan(runID, output, err, result.SpendUSD)
+}
+
+// flushScreenErrors copies the runner's accumulated screen failures onto
+// the result. A run that was never screened must not look like a run that
+// was screened and found clean — that distinction is the whole point of a
+// third containment layer.
+func (r *LoopRunner) flushScreenErrors(result *RunResult) {
+	if len(r.screenErrors) > 0 {
+		result.ScreenErrors = append([]string(nil), r.screenErrors...)
+	}
 }
 
 // validateResult enforces the M2 2K token cap on tool results.

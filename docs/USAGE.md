@@ -41,6 +41,7 @@ Read this before you plan work around it. As of this writing:
 | The step chooser | **model-driven when a gateway is wired** (`AGENTLOOP_ONEGW_URL`): one call per step, given the previous result, answering `{tool,args,why,done}`. With no gateway it falls back to the deterministic rotation and each step says which happened in its `why` |
 | The planner | **deterministic**, no model calls — it frames the phases; the *chooser* picks the action |
 | M7 multi-agent (`internal/supervisor`) | **gated shut** by design — refused unless one of [PRD §10](PRD.md#10-multi-agent-stance)'s four conditions is met |
+| Guardrail screening (`internal/guardrail`) | **live when configured** — the goal is judged before the first step and each tool result before it reaches the model. Unset URL means no screen, recorded in `screen_errors` rather than assumed clean |
 
 **What this means:** a run today exercises the real loop, budget, gate, and
 observability machinery end to end, and it **reads**: `query` returns real hits
@@ -106,6 +107,9 @@ Deployment facts, not compiled defaults:
 | `AGENTLOOP_XDEV_BIN` | `xdev` | the sandbox binary; agentloop speaks its `rpc` JSONL protocol |
 | `AGENTLOOP_XDEV_DIR` | a fresh temp dir | the workspace `write_file`/`run_tests` turns run in |
 | `AGENTLOOP_XDEV_OFF` | *(unset)* | any value disables the sandbox; those two tools then report no executor |
+| `AGENTLOOP_GUARDRAIL_URL` | *(unset — **no screen**) | System One endpoint (onegw or TypeSafe). Unset means unscreened, and runs say so in `screen_errors` |
+| `AGENTLOOP_GUARDRAIL_KEY` | *(empty)* | bearer key for Jev; a local Laya needs none |
+| `AGENTLOOP_GUARDRAIL_MODEL` | `jev-latest` | backend alias |
 | `AGENTLOOP_ONEGW_URL` | `http://127.0.0.1:8080` | gateway; when reachable, the model **chooses each step** |
 | `AGENTLOOP_ONEGW_COMBO` | `dev` | default combo — the wire `model` when no tier-specific one is set |
 | `AGENTLOOP_ONEGW_COMBO_PLANNING` | *(falls back to `COMBO`)* | combo for plan/replan steps |
@@ -331,6 +335,11 @@ Stated plainly, so nobody discovers it the hard way:
   phases and instructions come from a rule table (`planStepCount` on the goal's
   word count), so the loop decides **what to do next** but not **how to break
   the goal up**. In practice the chooser carries the run, and the plan is a hint.
+- **The guardrail screens in two of three directions.** The goal and each
+  tool result are judged (§7.2). The model's **reply on the way out** is not,
+  and the ~740 ms/call the PRD budgets is not yet metered by `BudgetGuard`. With
+  `AGENTLOOP_GUARDRAIL_URL` unset there is no screen at all, and the run records
+  that in `screen_errors` rather than looking clean.
 - **Tier routing reaches the wire, but the 40–70% number is unproven.** The
   loop sends a tier per call (`planning`/`execution`/`synthesis`) and each maps
   to a combo; unmapped tiers fall through to `AGENTLOOP_ONEGW_COMBO`, so a
