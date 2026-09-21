@@ -42,7 +42,7 @@ func (r *LoopRunner) choose(ctx context.Context, step int, result *RunResult) (S
 		return StepChoice{}, fmt.Errorf("no tool registry")
 	}
 
-	reply, err := r.model.Chat(ctx,
+	reply, err := r.model.ChatTier(ctx, r.tierForStepCombo(step),
 		onegw.Message{Role: "system", Content: reasonSystemPrompt(reg.List())},
 		onegw.Message{Role: "user", Content: buildReasonPrompt(r, step, result)},
 	)

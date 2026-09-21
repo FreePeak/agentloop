@@ -107,7 +107,10 @@ Deployment facts, not compiled defaults:
 | `AGENTLOOP_XDEV_DIR` | a fresh temp dir | the workspace `write_file`/`run_tests` turns run in |
 | `AGENTLOOP_XDEV_OFF` | *(unset)* | any value disables the sandbox; those two tools then report no executor |
 | `AGENTLOOP_ONEGW_URL` | `http://127.0.0.1:8080` | gateway; when reachable, the model **chooses each step** |
-| `AGENTLOOP_ONEGW_COMBO` | `dev` | combo used as the wire `model` for both step choice and synthesis |
+| `AGENTLOOP_ONEGW_COMBO` | `dev` | default combo — the wire `model` when no tier-specific one is set |
+| `AGENTLOOP_ONEGW_COMBO_PLANNING` | *(falls back to `COMBO`)* | combo for plan/replan steps |
+| `AGENTLOOP_ONEGW_COMBO_EXECUTION` | *(falls back to `COMBO`)* | combo for action steps (the hot path) |
+| `AGENTLOOP_ONEGW_COMBO_SYNTHESIS` | *(falls back to `COMBO`)* | combo for a bound-exit answer |
 
 Take the onegw key from `onegw.toml`'s `[auth] [[auth.keys]]`; the combo must
 exist there too, since the client sends whatever name you give it and onegw
@@ -328,7 +331,13 @@ Stated plainly, so nobody discovers it the hard way:
   phases and instructions come from a rule table (`planStepCount` on the goal's
   word count), so the loop decides **what to do next** but not **how to break
   the goal up**. In practice the chooser carries the run, and the plan is a hint.
-- **Tier routing is half-wired** — see §6.
+- **Tier routing reaches the wire, but the 40–70% number is unproven.** The
+  loop sends a tier per call (`planning`/`execution`/`synthesis`) and each maps
+  to a combo; unmapped tiers fall through to `AGENTLOOP_ONEGW_COMBO`, so a
+  one-combo deployment runs unchanged. What has **not** been run is §11.4's
+  paired parity suite, which is the only thing that can say whether the routing
+  actually saves money without costing quality. Until then the saving is a
+  hypothesis with a working mechanism behind it.
 - **M7 is gated shut**, correctly: the gate is a measurement, not a milestone,
   and it opens only when a [PRD §10](PRD.md#10-multi-agent-stance) condition is
   actually met.

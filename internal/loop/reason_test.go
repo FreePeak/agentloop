@@ -22,9 +22,11 @@ type scriptedModel struct {
 	errs    []error
 	calls   int
 	prompts []string
+	tiers   []string
 }
 
-func (m *scriptedModel) Chat(_ context.Context, msgs ...onegw.Message) (onegw.Reply, error) {
+func (m *scriptedModel) ChatTier(_ context.Context, tier string, msgs ...onegw.Message) (onegw.Reply, error) {
+	m.tiers = append(m.tiers, tier)
 	i := m.calls
 	m.calls++
 	for _, msg := range msgs {
@@ -349,5 +351,49 @@ func TestResumeReusesTheApprovedDecisionWithoutRecall(t *testing.T) {
 	if got := m.calls - callsAtHold; got > 3 {
 		t.Errorf("model called %d times after the hold; the held step was re-asked "+
 			"(steps 1-3 can each need one call)", got)
+	}
+}
+
+// The tier a step computes must reach the wire. It did not before: the
+// loop calculated a tier per step (M3), stored it on the run record, and
+// sent one fixed combo forever — so "tiered routing" was decoration.
+func TestReasonerSendsTheStepsTier(t *testing.T) {
+	m := &scriptedModel{replies: []string{
+		`{"tool":"query","args":{"query":"x"},"why":"a"}`,
+		`{"done":true,"why":"b"}`,
+	}}
+	r := reasonRunner(t, m, 3)
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if len(m.tiers) == 0 {
+		t.Fatal("no tier was sent to the model")
+	}
+	for i, tier := range m.tiers {
+		switch tier {
+		case TierPlanning, TierExecution, TierSynthesis:
+		default:
+			t.Errorf("call %d tier = %q, want one of the three routing tiers", i, tier)
+		}
+	}
+}
+
+// Synthesis is its own step type, so a bound-exit answer may run on a
+// different model than the loop that got stuck.
+func TestSynthesisCarriesItsOwnTier(t *testing.T) {
+	m := &scriptedModel{}
+	r := reasonRunner(t, m, 1)
+	// max_steps=1 forces a bound exit, which synthesises.
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	found := false
+	for _, tier := range m.tiers {
+		if tier == TierSynthesis {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("tiers sent = %v, want the synthesis call to name %q", m.tiers, TierSynthesis)
 	}
 }

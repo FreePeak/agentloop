@@ -72,7 +72,7 @@ func NewServer() *Server {
 			envOr("AGENTLOOP_ONEGW_URL", "http://127.0.0.1:8080"),
 			os.Getenv("AGENTLOOP_ONEGW_KEY"),
 			envOr("AGENTLOOP_ONEGW_COMBO", "dev"),
-		),
+		).WithTiers(tiersFromEnv()),
 		evalRunner: eval.NewRunner(func(cfg loop.RunnerConfig) (*loop.LoopRunner, *budget.Guard, tools.ToolRegistry, error) {
 			// Same runner the service builds, minus the model: the gate and
 			// the planner are part of what the cases exercise, so building a
@@ -105,6 +105,31 @@ func envOr(key, def string) string {
 //
 // No LeanKG API key: the service is local and its REST surface is
 // unauthenticated by design for a single-tenant deployment (PRD §7.4).
+// tiersFromEnv maps this loop's three routing tiers onto onegw combos.
+//
+// The gateway ships whatever combos an operator configured — in this
+// portfolio, exactly one (`dev`). Naming a combo here that does not exist
+// upstream is how "tiered routing" becomes an error instead of a saving,
+// so an unset tier simply falls through to AGENTLOOP_ONEGW_COMBO and the
+// loop still runs:
+//
+//	AGENTLOOP_ONEGW_COMBO_PLANNING   combo for plan/replan steps
+//	AGENTLOOP_ONEGW_COMBO_EXECUTION  combo for action steps (the hot path)
+//	AGENTLOOP_ONEGW_COMBO_SYNTHESIS  combo for the bound-exit answer
+func tiersFromEnv() map[string]string {
+	out := map[string]string{}
+	for tier, key := range map[string]string{
+		loop.TierPlanning:  "AGENTLOOP_ONEGW_COMBO_PLANNING",
+		loop.TierExecution: "AGENTLOOP_ONEGW_COMBO_EXECUTION",
+		loop.TierSynthesis: "AGENTLOOP_ONEGW_COMBO_SYNTHESIS",
+	} {
+		if v := os.Getenv(key); v != "" {
+			out[tier] = v
+		}
+	}
+	return out
+}
+
 func leankgFromEnv() *leankg.Client {
 	if os.Getenv("AGENTLOOP_LEANKG_OFF") != "" {
 		return nil

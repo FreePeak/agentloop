@@ -251,21 +251,49 @@ func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 
 // Kill closes the kill channel — the loop checks it at every
 // iteration boundary and exits state=killed within one step.
+// Tier names this loop actually routes on.
+//
+// The PRD's §13.1 move 3 says "route models by step type (40–70%)", and
+// the earlier code named three tiers — planning, execution, tiny — that
+// were never sent to anything, and two of which (planning/execution) are
+// not combos onegw ships. These are the three decisions the loop really
+// makes, and each maps to whatever combo the operator configured:
+//
+//	planning   — the plan is being made or revised
+//	execution  — a step's action is being chosen (the hot path)
+//	synthesis  — a bound fired and the run needs an answer
+const (
+	TierPlanning  = "planning"
+	TierExecution = "execution"
+	TierSynthesis = "synthesis"
+)
+
+// tierForStep is the tier a step runs at.
 func (r *LoopRunner) tierForStep(step int, cfg RunnerConfig) string {
 	if r.plan != nil && step < len(r.plan.Steps) {
-		return r.plan.Steps[step].Tier
+		if t := r.plan.Steps[step].Tier; t != "" {
+			return t
+		}
 	}
-	return "planning"
+	return TierExecution
 }
 
-func tierCombo(tier string) string {
+// tierForStepCombo is what the reasoner passes to the gateway.
+func (r *LoopRunner) tierForStepCombo(step int) string {
+	return tierForStepName(r.tierForStep(step, r.cfg))
+}
+
+// tierForStepName normalises a plan tier onto one of the three routing
+// tiers. A plan that names something else (the old `tiny`) still routes —
+// to execution — rather than silently falling off the table.
+func tierForStepName(tier string) string {
 	switch tier {
-	case "planning":
-		return "planning"
-	case "execution":
-		return "execution"
+	case TierPlanning:
+		return TierPlanning
+	case TierSynthesis:
+		return TierSynthesis
 	default:
-		return "tiny"
+		return TierExecution
 	}
 }
 
@@ -408,7 +436,7 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 		result.State = StateActing
 		// M3: use planner step tier for routing
 		if r.plan != nil && step < len(r.plan.Steps) {
-			result.CurrentTier = tierCombo(r.plan.Steps[step].Tier)
+			result.CurrentTier = tierForStepName(r.plan.Steps[step].Tier)
 		}
 
 		// --- M9: choose the action ---

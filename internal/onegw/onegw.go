@@ -41,16 +41,30 @@ type Usage struct {
 // Reply is one completion.
 type Reply struct {
 	Content string
-	Model   string // the leg that actually answered, not the combo we asked for
-	Usage   Usage
+	// Combo is the combo this call was routed to; Model is the leg that
+	// actually answered. They differ whenever onegw falls back, which is
+	// exactly the event tiering has to be judged on.
+	Combo string
+	Model string
+	Usage Usage
 }
 
-// Client talks to one onegw instance with one combo bound to it.
+// Client talks to one onegw instance.
+//
+// It holds a DEFAULT combo, not a single one: the loop routes per step
+// (PRD §13.1 move 3 — "route models by step type"), so the combo has to be
+// choosable per call. Sending one combo forever made tiering a decorative
+// field on the run record.
 type Client struct {
 	baseURL string
 	key     string
 	combo   string
 	http    *http.Client
+
+	// combos maps a tier name to the combo that serves it. When a tier is
+	// absent the default combo is used, so an operator who has not set up
+	// several combos still gets a working loop rather than an error.
+	combos map[string]string
 }
 
 // New returns a Client. baseURL is onegw's root (e.g.
@@ -65,17 +79,49 @@ func New(baseURL, key, combo string) *Client {
 	}
 }
 
-// Combo reports the combo this client routes through.
+// Combo reports the default combo.
 func (c *Client) Combo() string { return c.combo }
 
-// Chat sends the messages to the bound combo and returns its answer.
+// WithTiers returns a copy of the client whose calls naming a tier route
+// to that tier's combo. Nil or an empty map leaves the default in force.
+//
+// This is the whole of agentloop's tier routing: it picks the combo, onegw
+// picks the leg behind it (§4.3, "agentloop sends the tier per step; onegw
+// picks the leg").
+func (c *Client) WithTiers(tiers map[string]string) *Client {
+	out := *c
+	out.combos = tiers
+	return &out
+}
+
+// comboFor resolves the combo for a tier, falling back to the default so a
+// missing mapping degrades to "the loop still runs" rather than a failed
+// step.
+func (c *Client) comboFor(tier string) string {
+	if tier != "" && c.combos != nil {
+		if combo, ok := c.combos[tier]; ok && combo != "" {
+			return combo
+		}
+	}
+	return c.combo
+}
+
+// Chat sends the messages to the default combo and returns its answer.
 // The caller's context bounds the call; there is no retry here, because
 // the loop's own wall-clock and budget bounds are the retry policy.
 func (c *Client) Chat(ctx context.Context, msgs ...Message) (Reply, error) {
-	if c.combo == "" {
+	return c.ChatTier(ctx, "", msgs...)
+}
+
+// ChatTier is Chat, routed by tier. An unknown or empty tier uses the
+// default combo, so a misconfigured tier costs the wrong model, not a
+// failed run.
+func (c *Client) ChatTier(ctx context.Context, tier string, msgs ...Message) (Reply, error) {
+	combo := c.comboFor(tier)
+	if combo == "" {
 		return Reply{}, fmt.Errorf("onegw: no combo configured")
 	}
-	body, err := json.Marshal(map[string]any{"model": c.combo, "messages": msgs})
+	body, err := json.Marshal(map[string]any{"model": combo, "messages": msgs})
 	if err != nil {
 		return Reply{}, fmt.Errorf("onegw: encode request: %w", err)
 	}
@@ -138,6 +184,9 @@ func (c *Client) Chat(ctx context.Context, msgs ...Message) (Reply, error) {
 	return Reply{
 		Content: out.Choices[0].Message.Content,
 		Model:   out.Model,
-		Usage:   out.Usage,
+		// Combo is what we ASKED for; Model is the leg that answered.
+		// Recording both is what makes "did tiering work?" answerable.
+		Combo: combo,
+		Usage: out.Usage,
 	}, nil
 }
