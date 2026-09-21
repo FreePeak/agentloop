@@ -23,13 +23,14 @@ import (
 )
 
 // Server holds the in-memory run store, the runner/gate registry,
-// and the tool registry.
+// the tool registry, and the M6 eval runner that gates deploys.
 type Server struct {
-	mu      sync.Mutex
-	runs    map[string]loop.RunResult
-	runners map[string]*loop.LoopRunner
-	gates   map[string]*loop.ApprovalGate
-	tools   tools.ToolRegistry
+	mu         sync.Mutex
+	runs       map[string]loop.RunResult
+	runners    map[string]*loop.LoopRunner
+	gates      map[string]*loop.ApprovalGate
+	tools      tools.ToolRegistry
+	evalRunner *eval.Runner
 }
 
 // NewServer creates a Server with the 5 v1 tools and empty stores.
@@ -39,6 +40,10 @@ func NewServer() *Server {
 		runners: make(map[string]*loop.LoopRunner),
 		gates:   make(map[string]*loop.ApprovalGate),
 		tools:   tools.NewRegistry(),
+		evalRunner: eval.NewRunner(func(cfg loop.RunnerConfig) (*loop.LoopRunner, *budget.Guard, tools.ToolRegistry, error) {
+			return loop.NewRunner(cfg, budget.New(cfg.CostBudget, float64(loop.DailyCeilingMult)*cfg.CostBudget), tools.NewRegistry()),
+				budget.New(cfg.CostBudget, float64(loop.DailyCeilingMult)*cfg.CostBudget), tools.NewRegistry(), nil
+		}),
 	}
 }
 
@@ -125,6 +130,15 @@ func (s *Server) killRun(w http.ResponseWriter, r *http.Request) {
 	if result.PartialSynthesis == "" {
 		result.PartialSynthesis = "killed by operator"
 	}
+	// Signal the live runner's kill channel so the running
+	// goroutine exits within one step (P75). Without this the
+	// stored state is stamped but the loop keeps going.
+	s.mu.Lock()
+	runner := s.runners[runID]
+	s.mu.Unlock()
+	if runner != nil {
+		runner.Kill()
+	}
 	s.mu.Lock()
 	s.runs[runID] = result
 	s.mu.Unlock()
@@ -180,6 +194,7 @@ func (s *Server) submitApproval(w http.ResponseWriter, r *http.Request) {
 	runID := extractRunID(r.URL.Path)
 	s.mu.Lock()
 	gate, ok := s.gates[runID]
+	runner := s.runners[runID]
 	s.mu.Unlock()
 	if !ok {
 		http.Error(w, `{"error":"no gate found"}`, http.StatusNotFound)
@@ -195,6 +210,19 @@ func (s *Server) submitApproval(w http.ResponseWriter, r *http.Request) {
 		stepID = int(v)
 	}
 	approved := gate.Approve(runID, stepID)
+	// M5 resume path: approving the held step re-enters the
+	// runner, which re-checks the gate and continues the loop.
+	// Without this, approval is a ledger write that never
+	// resumes the run (issue: approval → resume gap).
+	if approved && runner != nil {
+		result, err := runner.Resume(context.Background())
+		if err != nil {
+			result.State = loop.StateFailed
+		}
+		s.mu.Lock()
+		s.runs[runID] = result
+		s.mu.Unlock()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"approved": approved})
 }
@@ -203,12 +231,23 @@ func (s *Server) submitApprovalByID(w http.ResponseWriter, r *http.Request) {
 	runID, stepID := parseApprovalPath(r.URL.Path)
 	s.mu.Lock()
 	gate, ok := s.gates[runID]
+	runner := s.runners[runID]
 	s.mu.Unlock()
 	if !ok {
 		http.Error(w, `{"error":"no gate found"}`, http.StatusNotFound)
 		return
 	}
 	approved := gate.Approve(runID, stepID)
+	// M5 resume path (see submitApproval).
+	if approved && runner != nil {
+		result, err := runner.Resume(context.Background())
+		if err != nil {
+			result.State = loop.StateFailed
+		}
+		s.mu.Lock()
+		s.runs[runID] = result
+		s.mu.Unlock()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"approved": approved})
 }
@@ -232,10 +271,18 @@ func parseApprovalPath(path string) (string, int) {
 }
 
 func (s *Server) evalReportHandler(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// M6: run the full eval suite (PRD §11.4, §13.1).
+	// Deploy is blocked when pass rate < 85%.
+	report, err := s.evalRunner.Run(context.Background(), "default", m6SuiteCases())
+	if err != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(eval.Report{SuiteID: "default", Total: 0, Passed: 0, PassRate: 0, ByCategory: map[string]float64{}})
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(eval.Report{SuiteID: "default", Total: 0, Passed: 0, PassRate: 0, ByCategory: map[string]float64{}})
+	json.NewEncoder(w).Encode(report)
 }
 
 func (s *Server) runsListHandler(w http.ResponseWriter, r *http.Request) {
@@ -286,6 +333,12 @@ func (s *Server) consoleKillHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	result.State = loop.StateKilled
 	result.Success = boolPtr(false)
+	// Signal the live runner's kill channel (P75); the stored
+	// state alone does not stop the running goroutine.
+	runner := s.runners[runID]
+	if runner != nil {
+		runner.Kill()
+	}
 	s.runs[runID] = result
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
@@ -338,6 +391,14 @@ func extractRunID(path string) string {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// m6SuiteCases returns the M6 acceptance suite (PRD §11.4) used as
+// the deploy gate. It delegates to eval.DefaultSuite so the suite
+// definition lives in one place (internal/eval) and the HTTP handler
+// stays a thin wire.
+func m6SuiteCases() []eval.Case {
+	return eval.DefaultSuite()
+}
 
 func main() {
 	s := NewServer()
