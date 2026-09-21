@@ -198,12 +198,20 @@ func (c *Client) Screen(ctx context.Context, text string) (Verdict, error) {
 	return v, nil
 }
 
-// probabilityOf reads one answer. System One answers are opaque JSON —
-// the docs say "answers arrive as an opaque JSON object keyed by question
-// id" — and in practice a noul comes back as a bare number, a
-// `{"probability":p}`, or a `{"label"/"type"…}` object. All three are
-// handled rather than one being assumed, because guessing wrong here does
-// not error: it silently reads every hazard as zero.
+// probabilityOf reads one Noul answer: P(yes), in [0,1].
+//
+// Two backends answer this wire, so two shapes are expected and both mean
+// the same thing:
+//
+//	{"type":"noul","noul":0.91, ...}   TypeSafe Jev's envelope
+//	{"probabilities":{"0":0.09,"1":0.91}}   a local Laya sidecar
+//
+// The key list is narrow on purpose. `confidence` is deliberately NOT in it:
+// an answer carrying both a probability and a confidence is common, and
+// preferring confidence reads every hazard as the model's self-assessment
+// rather than the hazard's probability — 0.88 where the hazard was 0.91.
+// Also handled: a bare number, because the docs describe answers as an opaque
+// JSON object and older experiments returned exactly that.
 func probabilityOf(raw json.RawMessage) (float64, bool) {
 	var f float64
 	if json.Unmarshal(raw, &f) == nil {
@@ -213,7 +221,20 @@ func probabilityOf(raw json.RawMessage) (float64, bool) {
 	if json.Unmarshal(raw, &obj) != nil {
 		return 0, false
 	}
-	for _, k := range []string{"probability", "prob", "p", "value", "score", "expectation", "confidence"} {
+	// A Noul: the explicit probability first, then the positive class.
+	for _, k := range []string{"noul", "probability", "p"} {
+		if v, ok := obj[k].(float64); ok {
+			return v, true
+		}
+	}
+	if probs, ok := obj["probabilities"].(map[string]any); ok {
+		// Laya labels the classes "0"/"1"; the "1" class is P(yes).
+		if v, ok := probs["1"].(float64); ok {
+			return v, true
+		}
+	}
+	// A Score: the expected level on the rubric, which Severity reads.
+	for _, k := range []string{"score", "value", "expectation"} {
 		if v, ok := obj[k].(float64); ok {
 			return v, true
 		}

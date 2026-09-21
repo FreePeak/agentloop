@@ -82,6 +82,53 @@ func TestScreenReadsHazardsAndSeverity(t *testing.T) {
 	}
 }
 
+// Two backends answer /v1/systemone, so both real envelopes must read the
+// same hazard — and neither may be read from `confidence`. An answer carrying
+// both a probability and a confidence is the normal case, and preferring the
+// confidence silently screens on the model's self-assessment (0.88) instead of
+// the hazard (0.91).
+func TestBothBackendEnvelopesAgree(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		hazard   float64
+		severity float64
+	}{
+		{
+			name:     "TypeSafe Jev",
+			body:     `{"model":"jev-1.13.0","answers":{"jailbreak":{"type":"noul","noul":0.91,"confidence":0.88},"severity":{"type":"score","score":2.05,"legend":{"2":"serious"}}}}`,
+			hazard:   0.91,
+			severity: 2.05,
+		},
+		{
+			name:     "local Laya sidecar",
+			body:     `{"model":"laya","answers":{"jailbreak":{"type":"noul","probabilities":{"0":0.09,"1":0.91},"confidence":0.8},"severity":{"type":"score","score":2}}}`,
+			hazard:   0.91,
+			severity: 2,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := tc.body
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+
+			got, err := New(srv.URL, "", "").Screen(context.Background(), "text")
+			if err != nil {
+				t.Fatalf("Screen() error: %v", err)
+			}
+			if got.Nouls["jailbreak"] != tc.hazard {
+				t.Errorf("jailbreak = %v, want %v (never the confidence)", got.Nouls["jailbreak"], tc.hazard)
+			}
+			if got.Severity != tc.severity {
+				t.Errorf("severity = %v, want %v", got.Severity, tc.severity)
+			}
+		})
+	}
+}
+
 // An answer shape this client does not understand must be an error, not a
 // silent zero. Reading a hazard as 0 when it is really 0.9 is the failure
 // mode that makes the screen decorative.

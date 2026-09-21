@@ -39,13 +39,13 @@ type Server struct {
 	tools      tools.ToolRegistry
 	evalRunner *eval.Runner
 	model      *onegw.Client
+	// guardrail screens every message against the System One battery
+	// (§7.2). Nil means no screen is configured, which the run records as
+	// screen_errors rather than as a clean verdict.
+	guardrail *guardrail.Client
 	// sandboxDir is the workspace sandboxed turns run in; empty when no
 	// executor is configured.
 	sandboxDir string
-	// guardrail screens every message against the System One battery
-	// (§7.2). Nil means no screen is configured, which the run records as
-	// errors rather than reporting as a clean verdict.
-	guardrail *guardrail.Client
 }
 
 // NewServer creates a Server with the v1 tool set and empty stores.
@@ -74,12 +74,12 @@ func NewServer() *Server {
 		gates:      make(map[string]*loop.ApprovalGate),
 		tools:      reg,
 		sandboxDir: sandboxDir,
-		guardrail:  guardrailFromEnv(),
 		model: onegw.New(
 			envOr("AGENTLOOP_ONEGW_URL", "http://127.0.0.1:8080"),
 			os.Getenv("AGENTLOOP_ONEGW_KEY"),
 			envOr("AGENTLOOP_ONEGW_COMBO", "dev"),
 		).WithTiers(tiersFromEnv()),
+		guardrail: guardrailFromEnv(),
 		evalRunner: eval.NewRunner(func(cfg loop.RunnerConfig) (*loop.LoopRunner, *budget.Guard, tools.ToolRegistry, error) {
 			// Same runner the service builds, minus the model: the gate and
 			// the planner are part of what the cases exercise, so building a
@@ -105,6 +105,31 @@ func envOr(key, def string) string {
 	return def
 }
 
+// tiersFromEnv maps this loop's three routing tiers onto onegw combos.
+//
+// The gateway ships whatever combos an operator configured — in this
+// portfolio, exactly one (`dev`). Naming a combo here that does not exist
+// upstream is how "tiered routing" becomes an error instead of a saving,
+// so an unset tier simply falls through to AGENTLOOP_ONEGW_COMBO and the
+// loop still runs:
+//
+//	AGENTLOOP_ONEGW_COMBO_PLANNING   combo for plan/replan steps
+//	AGENTLOOP_ONEGW_COMBO_EXECUTION  combo for action steps (the hot path)
+//	AGENTLOOP_ONEGW_COMBO_SYNTHESIS  combo for the bound-exit answer
+func tiersFromEnv() map[string]string {
+	out := map[string]string{}
+	for tier, key := range map[string]string{
+		loop.TierPlanning:  "AGENTLOOP_ONEGW_COMBO_PLANNING",
+		loop.TierExecution: "AGENTLOOP_ONEGW_COMBO_EXECUTION",
+		loop.TierSynthesis: "AGENTLOOP_ONEGW_COMBO_SYNTHESIS",
+	} {
+		if v := os.Getenv(key); v != "" {
+			out[tier] = v
+		}
+	}
+	return out
+}
+
 // leankgFromEnv wires the code-graph client from the environment.
 //
 //	AGENTLOOP_LEANKG_URL   default http://127.0.0.1:8090
@@ -112,10 +137,18 @@ func envOr(key, def string) string {
 //
 // No LeanKG API key: the service is local and its REST surface is
 // unauthenticated by design for a single-tenant deployment (PRD §7.4).
+func leankgFromEnv() *leankg.Client {
+	if os.Getenv("AGENTLOOP_LEANKG_OFF") != "" {
+		return nil
+	}
+	return leankg.New(envOr("AGENTLOOP_LEANKG_URL", "http://127.0.0.1:8090"))
+}
+
 // guardrailFromEnv builds the System One screening client.
 //
-//	AGENTLOOP_GUARDRAIL_URL    endpoint root (onegw, or TypeSafe directly);
-//	                           unset means NO screen, and runs record that
+//	AGENTLOOP_GUARDRAIL_URL    endpoint root (onegw, or TypeSafe / a Laya
+//	                           sidecar directly); unset means NO screen,
+//	                           and runs record that in screen_errors
 //	AGENTLOOP_GUARDRAIL_KEY    bearer key (Jev); a local Laya needs none
 //	AGENTLOOP_GUARDRAIL_MODEL  default jev-latest
 //
@@ -146,50 +179,38 @@ func (s *Server) screenFunc() loop.ScreenFunc {
 	}
 }
 
-// screenGoal judges the submitted goal before any step runs. It returns
-// the routed action ("pass"/"review"/"block") or an error when the screen
-// could not run — which the caller records rather than treating as clean.
-func (s *Server) screenGoal(goal string) (string, error) {
+// screenGoal judges the submitted goal before any step runs. It returns the
+// routed action ("pass"/"review"/"block") and the screen rows to record, or an
+// error when the screen could not run — which the caller records rather than
+// treating as clean.
+//
+// The rows come back with the verdict on purpose: the alternative is calling
+// the screen twice, or recording the action with none of the content that
+// decided it — which is how a blocked run ends up saying `noul_battery` and
+// nothing else.
+func (s *Server) screenGoal(goal string) (string, []loop.ScreenResult, error) {
 	if s.guardrail == nil {
-		return "", nil
+		return "", nil, nil
 	}
 	v, err := s.guardrail.Screen(context.Background(), goal)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return experiments.Route(v.Nouls, v.Severity, experiments.Strict), nil
+	action := experiments.Route(v.Nouls, v.Severity, policyFromEnv())
+	return action, loop.ScreenRowsFor(v.Nouls, v.Severity, action), nil
 }
 
-// tiersFromEnv maps this loop's three routing tiers onto onegw combos.
+// policyFromEnv selects the guardrail threshold set (PRD §17): strict is the
+// measured default, permissive the operator-selectable alternative, and an
+// unrecognised value is strict — a typo must not silently loosen a screen.
 //
-// The gateway ships whatever combos an operator configured — in this
-// portfolio, exactly one (`dev`). Naming a combo here that does not exist
-// upstream is how "tiered routing" becomes an error instead of a saving,
-// so an unset tier simply falls through to AGENTLOOP_ONEGW_COMBO and the
-// loop still runs:
-//
-//	AGENTLOOP_ONEGW_COMBO_PLANNING   combo for plan/replan steps
-//	AGENTLOOP_ONEGW_COMBO_EXECUTION  combo for action steps (the hot path)
-//	AGENTLOOP_ONEGW_COMBO_SYNTHESIS  combo for the bound-exit answer
-func tiersFromEnv() map[string]string {
-	out := map[string]string{}
-	for tier, key := range map[string]string{
-		loop.TierPlanning:  "AGENTLOOP_ONEGW_COMBO_PLANNING",
-		loop.TierExecution: "AGENTLOOP_ONEGW_COMBO_EXECUTION",
-		loop.TierSynthesis: "AGENTLOOP_ONEGW_COMBO_SYNTHESIS",
-	} {
-		if v := os.Getenv(key); v != "" {
-			out[tier] = v
-		}
+// The battery is a constant (internal/guardrail.Questions); the thresholds
+// are the tunable, which is exactly what §17 says should be calibrated.
+func policyFromEnv() experiments.Policy {
+	if strings.EqualFold(os.Getenv("AGENTLOOP_GUARDRAIL_POLICY"), "permissive") {
+		return experiments.Permissive
 	}
-	return out
-}
-
-func leankgFromEnv() *leankg.Client {
-	if os.Getenv("AGENTLOOP_LEANKG_OFF") != "" {
-		return nil
-	}
-	return leankg.New(envOr("AGENTLOOP_LEANKG_URL", "http://127.0.0.1:8090"))
+	return experiments.Strict
 }
 
 // xdevFromEnv starts ONE sandbox child and returns it, or nil when no
@@ -275,6 +296,9 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) {
 		// The eval runner deliberately gets no model — the deploy gate
 		// must stay deterministic and offline.
 		Model: s.model,
+		// M2.x: the guardrail thresholds this run screens under (strict by
+		// default; AGENTLOOP_GUARDRAIL_POLICY selects permissive).
+		Policy: policyFromEnv(),
 	}
 	runner := loop.NewRunnerWithPlannerAndGate(cfg, guard, s.tools, planner.NewPlanner(), gate).
 		WithGuardrailScreen(s.screenFunc())
@@ -283,49 +307,47 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) {
 	// context is the injection surface" — the goal is the first thing that
 	// enters it). A block here is the run never starting, which is the
 	// correct outcome for an injection; a review holds it for a human.
-	if verdict, err := s.screenGoal(body.Goal); err != nil {
-		runResult := loop.RunResult{
+	if verdict, screens, err := s.screenGoal(body.Goal); err != nil {
+		blocked := loop.RunResult{
 			RunID:        runID,
 			State:        loop.StateExhausted,
 			ExitReason:   loop.ExitGuardrailBlock,
 			ScreenErrors: []string{err.Error()},
 		}
-		runResult.Success = boolPtr(false)
+		blocked.Success = boolPtr(false)
 		s.mu.Lock()
-		s.runs[runID] = runResult
+		s.runs[runID] = blocked
 		s.mu.Unlock()
 		// The run id must reach the caller even when the goal is blocked:
 		// a 201 with no body is a client that cannot look up what happened.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		writeJSON(w, map[string]any{"run_id": runID, "state": runResult.State, "exit_reason": runResult.ExitReason})
+		writeJSON(w, map[string]any{"run_id": runID, "state": blocked.State, "exit_reason": blocked.ExitReason})
 		return
 	} else if verdict != "" && verdict != "pass" {
 		state := loop.StateExhausted
 		if verdict == "review" {
 			state = loop.StatePausedApproval
 		}
-		runResult := loop.RunResult{
+		held := loop.RunResult{
 			RunID:      runID,
 			State:      state,
 			ExitReason: loop.ExitGuardrailBlock,
 			Steps: []loop.StepRecord{{
-				StepID: 0,
-				Phase:  "evaluate",
-				Tool:   "(goal screen)",
-				Why:    "guardrail: " + verdict,
-				Screens: []loop.ScreenResult{{
-					Hazard: "noul_battery", Action: verdict,
-				}},
+				StepID:  0,
+				Phase:   "evaluate",
+				Tool:    "(goal screen)",
+				Why:     "guardrail: " + verdict,
+				Screens: screens,
 			}},
 		}
-		runResult.Success = boolPtr(false)
+		held.Success = boolPtr(false)
 		s.mu.Lock()
-		s.runs[runID] = runResult
+		s.runs[runID] = held
 		s.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		writeJSON(w, map[string]any{"run_id": runID, "state": runResult.State, "exit_reason": runResult.ExitReason})
+		writeJSON(w, map[string]any{"run_id": runID, "state": held.State, "exit_reason": held.ExitReason})
 		return
 	}
 	s.mu.Lock()

@@ -28,7 +28,7 @@ import (
 type ScreenResult struct {
 	Hazard string  `json:"hazard"`
 	Prob   float64 `json:"prob"`
-	Action string  `json:"action"` // pass | review | block
+	Action string  `json:"action"` // pass | review | block | unavailable
 	// Error is set when the screen could not run. It is recorded ON the
 	// step rather than swallowed, because an outage must not read as a
 	// clean verdict — that is the difference between a containment layer
@@ -113,6 +113,13 @@ type RunnerConfig struct {
 	Gate                *ApprovalGate // M5: fail-closed HITL gate (nil = bypass, tests)
 	SandboxDir          string        // workspace a sandboxed turn runs in (empty = tool's own default)
 	Model               ModelClient   // M8: outbound model transport (nil = deterministic synthesis only)
+	// Policy is the guardrail threshold set. The zero value is the
+	// measured strict default (PRD §17), so a deploy that never sets it
+	// screens strictly; Permissive is the operator-selectable
+	// alternative (a jailbreak dressed as a medical accommodation
+	// scores block under strict and review under permissive — measured
+	// 2026-09-19, §7.2).
+	Policy experiments.Policy
 }
 
 // LoopRunner runs one bounded agent loop. Ceilings are enforced
@@ -143,16 +150,16 @@ type LoopRunner struct {
 	model               ModelClient      // M8: outbound model transport (nil = deterministic synthesis)
 	guardrailScreen     ScreenFunc       // M2.x: TypeSafe Noul/Score screen (nil = no screen configured)
 	pausedStep          int              // step held at paused_approval (M5)
+	// screenErrors records each step whose guardrail screen could not run.
+	// Surfaced on the run so an operator can tell "nothing was flagged"
+	// from "nothing was checked".
+	screenErrors []string
 	// heldChoice is the decision already made for the held step. Resume
 	// replays it rather than re-asking the model: a second call can choose
 	// a DIFFERENT tool, which would run something the operator never saw,
 	// under an approval for something else. Cost is the smaller reason.
 	heldChoice *StepChoice
-	// screenErrors records each step whose guardrail screen could not run.
-	// Surfaced on the run so an operator can tell "nothing was flagged"
-	// from "nothing was checked".
-	screenErrors []string
-	lastResult   RunResult // partial result at pause (M5 resume)
+	lastResult RunResult // partial result at pause (M5 resume)
 }
 
 // NewRunner returns a LoopRunner for the given config.
@@ -223,8 +230,7 @@ func NewRunnerWithApprovalGate(cfg RunnerConfig, guard *budget.Guard, reg tools.
 
 // NewRunnerWithTypeSafeScreen returns a LoopRunner with a guardrail
 // screening function (M2.x, §7.2): every tool result before it reaches the
-// model, and the model's reply before it reaches the operator, is judged
-// and Route() decides pass/review/block at the step boundary.
+// model is judged and Route() decides pass/review/block at the step boundary.
 //
 // The picker is nil, not nextToolDefault, for the same reason
 // NewRunnerWithPlannerAndGate's is: a non-nil picker wins over the
@@ -263,6 +269,9 @@ func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	if cfg.EscalationThreshold == 0 {
 		cfg.EscalationThreshold = EscalationThreshold
 	}
+	if cfg.Policy == (experiments.Policy{}) {
+		cfg.Policy = experiments.Strict
+	}
 	if t == nil {
 		t = tracer.New()
 	}
@@ -284,8 +293,6 @@ func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 	}
 }
 
-// Kill closes the kill channel — the loop checks it at every
-// iteration boundary and exits state=killed within one step.
 // Tier names this loop actually routes on.
 //
 // The PRD's §13.1 move 3 says "route models by step type (40–70%)", and
@@ -332,6 +339,8 @@ func tierForStepName(tier string) string {
 	}
 }
 
+// Kill closes the kill channel — the loop checks it at every
+// iteration boundary and exits state=killed within one step.
 func (r *LoopRunner) Kill() {
 	select {
 	case <-r.killCh:
@@ -611,57 +620,65 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 		tr = validateResult(tr)
 
 		// --- M2.x: TypeSafe guardrail screen ---
+		//
+		// The screen runs on the tool result before it can reach the model
+		// (§7.2: "the model context is the injection surface"). The text
+		// under judgement is the rendered result, not the tool name — a
+		// battery asked about a name screens nothing.
+		//
+		// A screen that cannot run is recorded and the step continues: an
+		// outage must not block every run, and it must not read as "the
+		// content was clean" either. The verdict is attached to the step
+		// that produced the content, so a blocked run can answer "what was
+		// it blocked on?" from its own trajectory.
+		var screens []ScreenResult
 		if r.guardrailScreen != nil {
-			// Screen the tool result before it can reach the model (§7.2:
-			// "the model context is the injection surface"). The text under
-			// judgement is the rendered result, not the tool name — a
-			// battery asked about a name screens nothing.
 			screenText := renderResult(tr.Data)
 			nouls, sev, serr := r.guardrailScreen(screenText)
-			sr := ScreenResult{Hazard: "noul_battery", Prob: sev}
-
 			if serr != nil {
-				// A screen that could not run is recorded as such and the
-				// step continues. Fail-closed here would mean an outage
-				// blocks every run; silent-pass would mean the containment
-				// claim is false exactly when it matters. Recorded is the
-				// only honest third option.
-				sr.Action = "unavailable"
-				sr.Error = serr.Error()
-				if len(result.Steps) > 0 {
-					result.Steps[len(result.Steps)-1].Screens = append(result.Steps[len(result.Steps)-1].Screens, sr)
-				}
+				action := "unavailable"
+				screens = []ScreenResult{{
+					Hazard: "noul_battery",
+					Prob:   sev,
+					Action: action,
+					Error:  serr.Error(),
+				}}
 				r.screenErrors = append(r.screenErrors, fmt.Sprintf("step %d: %v", step, serr))
 			} else {
-				action := experiments.Route(nouls, sev, experiments.Strict)
-				sr.Action = action
-				if len(result.Steps) > 0 {
-					result.Steps[len(result.Steps)-1].Screens = append(result.Steps[len(result.Steps)-1].Screens, sr)
+				action := experiments.Route(nouls, sev, r.cfg.Policy)
+				screens = ScreenRowsFor(nouls, sev, action)
+				if action == "review" || action == "block" {
+					// The screened content never reaches the model, so this
+					// step is the only record of what the screen saw.
+					result.Steps = append(result.Steps, StepRecord{
+						StepID:    step,
+						Phase:     "act",
+						Tool:      toolName,
+						ArgsHash:  argsHash,
+						Args:      args,
+						Why:       why,
+						Result:    tr.Data,
+						CostUSD:   0.001,
+						LatencyMs: latency,
+						Screens:   screens,
+					})
+					if action == "review" {
+						result.State = StatePausedApproval
+						_ = r.synthesize(ctx, &result)
+						r.pausedStep = step
+						r.heldChoice = held
+						r.lastResult = result
+						r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("guardrail: review required"))
+						return result, nil
+					}
+					result.State = StateExhausted
+					result.ExitReason = ExitGuardrailBlock
+					result.Success = ptr(false)
+					_ = r.synthesize(ctx, &result)
+					r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("guardrail: blocked"))
+					return result, nil
 				}
-				_ = nouls
 			}
-			action := sr.Action
-			_ = nouls
-			if action == "review" {
-				result.State = StatePausedApproval
-				_ = r.synthesize(ctx, &result)
-				r.pausedStep = step
-				r.heldChoice = held
-				r.lastResult = result
-				r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("guardrail: review required"))
-				return result, nil
-			}
-			if action == "block" {
-				result.State = StateExhausted
-				result.ExitReason = ExitGuardrailBlock
-				result.Success = ptr(false)
-				_ = r.synthesize(ctx, &result)
-				r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("guardrail: blocked"))
-				return result, nil
-			}
-			// ponytail: ceiling — the step records the routed action plus the
-			// severity, not the full per-hazard battery. Upgrade path: keep
-			// nouls in ScreenResult when the console needs the breakdown.
 		}
 
 		if err != nil || !tr.Success {
@@ -679,6 +696,7 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 				Result:    map[string]any{"error": stepError(err, tr), "message": tr.Message},
 				CostUSD:   0.001,
 				LatencyMs: latency,
+				Screens:   screens,
 			})
 			r.tracer.EndSpan(spanID, tr, err, 0.001)
 			r.rememberStep(step, toolName, tr.Message, true)
@@ -702,6 +720,7 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 			CostUSD:    0.001,
 			LatencyMs:  latency,
 			Confidence: stepConf,
+			Screens:    screens,
 		})
 		r.tracer.EndSpan(spanID, tr, nil, 0.001)
 		r.rememberStep(step, toolName, tr.Data, false)
