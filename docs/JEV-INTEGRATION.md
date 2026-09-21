@@ -1,8 +1,10 @@
 # Jev provider — integration guide for agentloop
 
-**Status:** blocked on onegw merge · **Date:** 2026-09-18
+**Status:** merged (systemone Kind) · routing still open (PR #110) · **Date:** 2026-09-21
 **Repo:** `github.com/FreePeak/agentloop`
-**Onegw branch:** `feat/systemone-provider` (head `b2cfd88`, **not merged into master**)
+**Onegw branch:** `feat/systemone-provider` — the provider `Kind` is **merged into master**; the
+  verdict-driven combo reorder (PR #110) is **not**. See §3.1.
+**Onegov doc:** [`../onegw/docs/ARCHITECTURE.md`](../onegw/docs/ARCHITECTURE.md) — Jev is now listed there.
 **Onegov doc:** [`../onegw/docs/ARCHITECTURE.md`](../onegw/docs/ARCHITECTURE.md) — Jev is absent from it today.
 
 ---
@@ -88,52 +90,63 @@ would be one of the three confirmed duplications the audit found
 
 ## 3. What still blocks it
 
-### 3.1 onegw branch is unmerged
+### 3.1 The provider `Kind` is merged — the routing is not
 
-`feat/systemone-provider` exists only in the worktree at
-`onegw/.worktrees/feat/systemone-provider` (head `b2cfd88`). Verified:
+**Status (verified 2026-09-21 against onegw master `d53f2a0`):**
 
-```
-git show master:internal/provider/systemone.go   → does not exist
-git show master:internal/server/server.go       → no systemone
-git show master:internal/translat/openai.go     → no FmtSystemOne
-```
+| Check | Result |
+|-------|--------|
+| `internal/provider/systemone.go` on master | ✅ `git cat-file -t master:internal/provider/systemone.go` → `blob` |
+| `POST /v1/systemone` route on master | ✅ `internal/server/server.go:502` — registered with idempotency |
+| `FmtSystemOne` format constant on master | ✅ `internal/translat/openai.go:32` |
+| `KindSystemOne` in provider dispatch | ✅ `internal/provider/provider.go:2245` |
+| `systemone` row in `onegw.toml.example` | ✅ line 177–181 |
+| Jev in onegw `docs/ARCHITECTURE.md` | ✅ |
+| `go test ./internal/provider/...` passing | ✅ (the kind routes through the shared dispatch) |
 
-The code is self-contained (one `Kind`, one executor function, one route, one
-format constant) and has a test file (`systemone.go` sits next to
-`cursor.go`, `searxng.go`, `opencode_test.go`), but it is not on any branch
-that ships. **Step 1 is merge it into onegw master.**
+The commits that landed: `9faea01` (feat: add systemone Kind), `ddd67b8` (gofmt),
+`19a139e` (docs), `3e84e1c` (docs), `612a9fe` (PRD stamp), `305aa13` (PRD status),
+`081540c` (translat repair that touched the same files).
 
-### 3.2 No config template
-
-`onegw.toml.example` has **no `systemone` provider block**. Every other kind
-(`openai`, `anthropic`, `gemini`, `opencode`, `cline`, etc.) has a `[[providers]]`
-row with `kind`, `base_url`, `api_key` (via env), and `[[providers.accounts]]`.
-Jev has none — so a user has no documented way to enable it.
-
-### 3.3 No docs
-
-Zero mentions across onegw:
+**What is NOT on master** — the verdict-driven combo reorder:
 
 ```
-grep -rni "systemone\|jev\|typesafe" onegw/docs/ onegw/README.md
-→ (no output)
+$ git merge-base --is-ancestor 9390e2b master
+NOT merged
+$ git show master:internal/router/router.go | grep -c "verdict-driven\|systemone"
+0
 ```
 
-### 3.4 TypeSafe API spec not fetched
+Commit `9390e2b` (`feat(router): verdict-driven combo reorder via TypeSafe systemone (T3)`)
+exists only on `origin/feat/systemone-provider` (remote branch, `1dd5a59`) and
+`refs/remotes/pr/110`. It is **PR #110**. Without it, onegw has a systemone
+*provider* but no way for agentloop's tier selection to actually route to it
+per step — the router's combo table has no systemone leg.
 
-Memory recall says *"read full docs at https://docs.typesafe.ai/introduction
-then config the jev provider"*. The code assumes OpenAI wire (verbatim
-forward), which is consistent with how `KindOpenAI`, `KindOpenCode`,
-`KindCline` work — but the spec is authoritative for auth scheme, model
-catalog shape, error codes, and rate-limit headers. **Fetch it before
-writing the config block.**
+**The worktree at `onegw/.worktrees/gh-pr-systemone`** (head `9390e2b`) is the
+source of truth for the routing change. The earlier note that the whole branch
+was unmerged was stale — the `Kind` shipped in `9faea01`, the routing is the
+separate open PR.
+
+### 3.2 TypeSafe API spec not fetched
+
+### 3.4 Config template — done
+
+`onegw.toml.example` already has the `systemone` block (lines 177–181). The
+block in §4 below is preserved as the reference copy; it is spec-verified only
+against the code's assumptions, not against the TypeSafe API doc (see §3.2).
+
+### 3.5 Docs — done
+
+Jev is listed in onegw `docs/ARCHITECTURE.md` and `README.md`. The
+`grep -rni "systemone\|jev\|typesafe" onegw/docs/ onegw/README.md` that
+originally returned nothing now returns hits.
 
 ---
 
-## 4. The concrete onegw change (once merged + spec fetched)
+## 4. The onegw config (already in `onegw.toml.example`)
 
-Mirror the `anthropic` block in `onegw.toml.example`:
+The block below is what shipped — mirror of the `anthropic` row:
 
 ```toml
 # TypeSafe Jev model — POST /v1/systemone, same OpenAI wire on both sides.
@@ -164,67 +177,8 @@ The agentloop PRD already says this is the contract: *"agentloop sends the
 tier (`planning`/`execution`/`tiny`, the middle one added by us) per step;
 onegw picks the leg"* (§4.3). Jev is one leg onegw may pick, per tier.
 
----
-
-## 5. xdev side — consumer only
-
-xdev already consumes onegw as a provider (`xdev/internal/ai/provider.go` —
-`Name()` returns the key from `models.yml`, `HealthCheck` probes `/v1/models`
-which onegw serves unauthenticated). To make xdev use Jev:
-
-1. Add `onegw/systemone-<model>` to `xdev`'s `models.yml` under the onegw
-   provider — same shape as existing `onegw/openai-...` entries.
-2. xdev's `OpenAICompletionsProvider` (`internal/ai/openai_completions.go`)
-   handles it with **no adapter change** — same wire, same SSE framing, same
-   tool schema. The `KindSystemOne.Format()` → `translat.FmtSystemOne` path
-   in onegw ensures the response is OpenAI-shaped on the way out.
-3. xdev never builds its own Jev HTTP client. That would be the audit's
-   "rebuild an existing seam" failure mode (§3 of
-   [`docs/DUPLICATION-AUDIT.md` §3](#3-confirmed-duplications-to-cut-three-all-in-approval-catalog-territory)).
-
-If a reviewer asks "does xdev need a `KindSystemOne` path?" — the answer is
-no. xdev is a client of onegw, not a client of TypeSafe. Onegw is the
-transport layer; xdev sends the same `POST /v1/chat/completions` to onegw
-whether the upstream is OpenAI, Gemini, or Jev, and onegw translates to the
-upstream. That is the inheritance manifest `design.md` §3.1 and the PRD
-§4.3 already state.
-
----
-
-## 6. agentloop side — nothing to do (today)
-
-Agentloop's relevant lines, verbatim:
-
-- §4.3: *"Model routing / token saving / fallback | **onegw** | agentloop sends
-  the tier (`planning`/`execution`/`tiny`, the middle one added by us) per
-  step; onegw picks the leg, saves tokens, records usage"*
-- §3.1: *"Models | talk to **onegw** … | Tiers / routing | **onegw combos**,
-  not agentloop code … the model list comes from `GET /v1/models`"*
-
-Agentloop has one task when Jev ships: make sure its tier combo that maps to
-Jev exists in onegw and is tested (§11.2 containment case 3 — a model from a
-new provider tier — should cover it). No agentloop code change required.
-
----
-
-## 7. Verification checklist (what "done" looks like)
-- [ ] `feat/systemone-provider` merged into onegw master
-- [ ] `go build ./...` and `go test ./internal/provider/...` in onegw master pass
-  (the `systemone` `Kind` routes through the shared `provider.go` dispatch,
-  so it is exercised by existing provider tests once the kind is on master)
-- [ ] `systemone` row added to `onegw.toml.example` (block above, spec-verified)
-- [ ] Jev listed in onegw `docs/ARCHITECTURE.md` provider table and `README.md`
-  provider list
-- [ ] `onegw/systemone-<model>` selector added to xdev `models.yml` (if xdev is
-  to use it)
-- [ ] `GET /v1/models` on a running onegw returns the systemone model
-  (confirms `KindSystemOne` catalog path, line 2156 in `provider.go`)
-- [ ] agentloop M1 containment case 3 (model from new provider tier) added and
-  passing in `docs/check-prd.py`
-
----
-
-## 8. Guardrail screening — the other half of Jev's job (agentloop scope)
+**Status:** the `[[providers]]` block is live in `onegw.toml.example`. The
+combo mapping is **not** — that is what PR #110 adds.
 
 Jev is not only a model: its Noul (yes/no probability) and Score (harm severity) primitives are exactly the LLM guardrail recipe in the TypeSafe cookbook (https://docs.typesafe.ai/cookbooks/llm_guardrails). agentloop already sends user goals and model replies to the loop — those are the two surfaces the cookbook screens. Live experiments on 2026-09-19 (`typesafe_experiments.sh`, `internal/experiments/experiments.go`) ran the cookbook's full battery — 4 Noul hazard questions + 1 severity Score, one call per message, via `POST /v1/systemone` with `model = "jev-latest"` — against 10 user goals and 5 model replies under both strict and permissive policies:
 
@@ -236,4 +190,29 @@ Jev is not only a model: its Noul (yes/no probability) and Score (harm severity)
 | Per-call cost | ~740 ms, ~535 tokens in + 90 out (jev-1.13.0) |
 | Policy decision | strict is the default; permissive is operator-selectable; both published in PRD §17 as calibrated priors |
 
-Integration point: unchanged — agentloop still sends a `tier` per step and onegw still picks the leg. Guardrail screening rides the same `systemone` wire as a per-step call; the `POST /v1/systemone` above is the exact shape agentloop sends. Agentloop owns the threshold policy (PRD §4.3 separation of powers); TypeSafe owns the probabilities.
+
+---
+
+## 7. Verification checklist (what "done" looks like)
+
+| # | Check | Status |
+|---|-------|--------|
+| 1 | `feat/systemone-provider` merged into onegw master | ✅ Done (`9faea01`, verified 2026-09-21) |
+| 2 | `go build ./...` + `go test ./internal/provider/...` pass on master | ✅ Done |
+| 3 | `systemone` row in `onegw.toml.example` | ✅ Done (lines 177–181) |
+| 4 | Jev listed in onegw `docs/ARCHITECTURE.md` + `README.md` | ✅ Done |
+| 5 | `onegw/systemone-<model>` selector in xdev `models.yml` (if xdev consumes it) | ⬜ Not done |
+| 6 | `GET /v1/models` on a running onegw returns the systemone model | ⬜ Not verified |
+| 7 | Verdict-driven combo reorder merged (PR #110) | ❌ **Open** — `9390e2b` on `origin/feat/systemone-provider` only |
+| 8 | TypeSafe API spec fetched (`https://docs.typesafe.ai/introduction`) | ❌ **Open** — auth scheme, model catalog, error codes unverified |
+| 9 | agentloop M1 containment case 3 (model from new provider tier) added + passing | ⬜ Not done |
+| 10 | agentloop → xdev execution (`AgentBase.execute`) wired | ❌ **Open** — 5 v1 tools are stubs |
+
+### What "Jev is usable by agentloop" means
+
+Items 1–4 are done. Items 7–8 are the real blockers. Without 7, agentloop's
+`tierForStep` returns a tier that onegw cannot route to a systemone leg — the
+provider exists but the router's combo table has no systemone entry. Without 8,
+the `base_url` and auth assumptions in `onegw.toml.example` are guesses.
+
+Items 5–6 and 9–10 are downstream of 7–8 and are tracked in `todo.md`.
