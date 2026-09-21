@@ -5,7 +5,7 @@ package experiments
 
 // HazardAction maps each Noul hazard id to its configured action.
 var HazardAction = map[string]string{
-	"jailbreak":      "block",
+	"jailbreak":       "block",
 	"harmful_request": "block",
 	"medical_advice":  "review",
 	"self_harm":       "support",
@@ -44,9 +44,9 @@ func Route(nouls map[string]float64, severity float64, policy Policy) string {
 
 // Policy holds the two thresholds + severity block line.
 type Policy struct {
-	ReviewThreshold   float64
-	ActionThreshold   float64
-	SeverityBlock     float64
+	ReviewThreshold float64
+	ActionThreshold float64
+	SeverityBlock   float64
 }
 
 var Strict = Policy{ReviewThreshold: 0.35, ActionThreshold: 0.70, SeverityBlock: 2.0}

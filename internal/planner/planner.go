@@ -21,23 +21,23 @@ import (
 // Design.md §3: "Planner/Executor/Replanner — explicit plan object the loop
 // mutates; executor ReAct-inside; replanner binary check".
 type Plan struct {
-	Goal         string       `json:"goal"`
-	Context      string       `json:"context,omitempty"`
-	Steps        []PlanStep   `json:"steps"`
-	Tier         string       `json:"tier"` // routing tier: planning | tiny | execution
-	Frame        string       `json:"frame"` // LOOP | AGENT | CHAIN | REFINE | SCALE
-	ReplanNeeded bool         `json:"replan_needed,omitempty"` // true if Replan decided the plan must change
+	Goal         string     `json:"goal"`
+	Context      string     `json:"context,omitempty"`
+	Steps        []PlanStep `json:"steps"`
+	Tier         string     `json:"tier"`                    // routing tier: planning | tiny | execution
+	Frame        string     `json:"frame"`                   // LOOP | AGENT | CHAIN | REFINE | SCALE
+	ReplanNeeded bool       `json:"replan_needed,omitempty"` // true if Replan decided the plan must change
 }
 
 // PlanStep is one sentence in the plan. FR-3: 3–7 one-sentence steps with
 // success criteria + dependency marks.
 type PlanStep struct {
-	Index        int      `json:"index"`
-	Phase        string   `json:"phase"`         // decompose | reason | act | evaluate | synthesize (Ch.5)
-	Instruction  string   `json:"instruction"`   // one sentence
-	Success      string   `json:"success_criteria"` // predicate the loop evaluates after this step
-	Dependencies []int    `json:"dependencies"`  // zero-based step indices this step reads from
-	Tier         string   `json:"tier"`          // per-step tier override (planning/tiny/execution)
+	Index        int    `json:"index"`
+	Phase        string `json:"phase"`            // decompose | reason | act | evaluate | synthesize (Ch.5)
+	Instruction  string `json:"instruction"`      // one sentence
+	Success      string `json:"success_criteria"` // predicate the loop evaluates after this step
+	Dependencies []int  `json:"dependencies"`     // zero-based step indices this step reads from
+	Tier         string `json:"tier"`             // per-step tier override (planning/tiny/execution)
 }
 
 // PlannerConfig holds the tunables a plan is built from.
@@ -175,10 +175,10 @@ func (p *Planner) Steps() *Plan {
 		return nil
 	}
 	out := &Plan{
-		Goal:  p.plan.Goal,
+		Goal:    p.plan.Goal,
 		Context: p.plan.Context,
-		Tier:  p.plan.Tier,
-		Frame: p.plan.Frame,
+		Tier:    p.plan.Tier,
+		Frame:   p.plan.Frame,
 	}
 	out.Steps = copySteps(p.plan.Steps)
 	return out

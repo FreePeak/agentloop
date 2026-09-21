@@ -20,40 +20,40 @@ func TestEval_RunAllCategories(t *testing.T) {
 
 	cases := []eval.Case{
 		{
-			ID:       "happy-1",
-			Category: eval.CatHappy,
-			Goal:     "happy path test",
-			Context:  "test",
-			ScoreFn:  func(_ loop.RunResult) float64 { return 0.9 },
+			ID:         "happy-1",
+			Category:   eval.CatHappy,
+			Goal:       "happy path test",
+			Context:    "test",
+			ScoreFn:    func(_ loop.RunResult) float64 { return 0.9 },
 			LatencyCap: 10 * time.Second,
-			CostCap:  1.00,
+			CostCap:    1.00,
 		},
 		{
-			ID:       "edge-1",
-			Category: eval.CatEdge,
-			Goal:     "edge case test",
-			Context:  "test",
-			ScoreFn:  func(_ loop.RunResult) float64 { return 0.85 },
+			ID:         "edge-1",
+			Category:   eval.CatEdge,
+			Goal:       "edge case test",
+			Context:    "test",
+			ScoreFn:    func(_ loop.RunResult) float64 { return 0.85 },
 			LatencyCap: 10 * time.Second,
-			CostCap:  1.00,
+			CostCap:    1.00,
 		},
 		{
-			ID:       "adversarial-1",
-			Category: eval.CatAdversarial,
-			Goal:     "adversarial test",
-			Context:  "test",
-			ScoreFn:  func(_ loop.RunResult) float64 { return 0.6 },
+			ID:         "adversarial-1",
+			Category:   eval.CatAdversarial,
+			Goal:       "adversarial test",
+			Context:    "test",
+			ScoreFn:    func(_ loop.RunResult) float64 { return 0.6 },
 			LatencyCap: 10 * time.Second,
-			CostCap:  1.00,
+			CostCap:    1.00,
 		},
 		{
-			ID:       "regression-1",
-			Category: eval.CatRegression,
-			Goal:     "regression test",
-			Context:  "test",
-			ScoreFn:  func(_ loop.RunResult) float64 { return 0.75 },
+			ID:         "regression-1",
+			Category:   eval.CatRegression,
+			Goal:       "regression test",
+			Context:    "test",
+			ScoreFn:    func(_ loop.RunResult) float64 { return 0.75 },
 			LatencyCap: 10 * time.Second,
-			CostCap:  1.00,
+			CostCap:    1.00,
 		},
 	}
 
@@ -145,11 +145,11 @@ func TestEval_RunWithRealLoop(t *testing.T) {
 
 	cases := []eval.Case{
 		{
-			ID:        "real-1",
-			Category:  eval.CatHappy,
-			Goal:      "run a short task",
-			Context:   "eval test",
-			ScoreFn:   func(r loop.RunResult) float64 {
+			ID:       "real-1",
+			Category: eval.CatHappy,
+			Goal:     "run a short task",
+			Context:  "eval test",
+			ScoreFn: func(r loop.RunResult) float64 {
 				if r.State == loop.StateSuccess || r.State == loop.StateExhausted {
 					return 0.9
 				}

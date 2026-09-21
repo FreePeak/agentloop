@@ -96,7 +96,6 @@ type LoopRunner struct {
 	killCh              chan struct{}
 	seenArgs            map[string]int // dedupKey -> count
 	consecutiveFailures int
-	currentTier         string
 	spendSoFar          float64
 	bestConfidence      float64
 	currentConfidence   float64
@@ -300,9 +299,7 @@ func (r *LoopRunner) runWith(ctx context.Context, fresh bool) (RunResult, error)
 		// --- M4: resume from checkpoint if present ---
 		if r.checkpointStore != nil {
 			r.prepareResume()
-			for _, sr := range r.restoredSteps {
-				result.Steps = append(result.Steps, sr)
-			}
+			result.Steps = append(result.Steps, r.restoredSteps...)
 		}
 	} else {
 		// Resume: pick up exactly where the approval

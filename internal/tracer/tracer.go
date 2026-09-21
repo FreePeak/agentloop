@@ -13,32 +13,32 @@ import (
 type SpanKind string
 
 const (
-	SpanRouter   SpanKind = "router"    // tier/model selection
-	SpanPlanner  SpanKind = "planner"   // plan generation
-	SpanExecutor SpanKind = "executor"  // tool execution
-	SpanEvaluate SpanKind = "evaluate"  // eval scoring
-	SpanThink    SpanKind = "think"     // reasoning phase
-	SpanAct      SpanKind = "act"       // action phase
-	SpanSystem   SpanKind = "system"    // system event (budget, kill, exit)
+	SpanRouter   SpanKind = "router"   // tier/model selection
+	SpanPlanner  SpanKind = "planner"  // plan generation
+	SpanExecutor SpanKind = "executor" // tool execution
+	SpanEvaluate SpanKind = "evaluate" // eval scoring
+	SpanThink    SpanKind = "think"    // reasoning phase
+	SpanAct      SpanKind = "act"      // action phase
+	SpanSystem   SpanKind = "system"   // system event (budget, kill, exit)
 )
 
 // Span is one unit of trace. Spans nest via ParentID to form a tree.
 type Span struct {
-	SpanID     string         `json:"span_id"`
-	ParentID   string         `json:"parent_id,omitempty"`
-	RunID      string         `json:"run_id"`
-	Kind       SpanKind       `json:"kind"`
-	Label      string         `json:"label"`
-	Step       int            `json:"step,omitempty"`
-	Input      interface{}    `json:"input,omitempty"`
-	Output     interface{}    `json:"output,omitempty"`
-	Error      string         `json:"error,omitempty"`
-	LatencyMs  int64          `json:"latency_ms,omitempty"`
-	CostUSD    float64        `json:"cost_usd,omitempty"`
-	StartMs    int64          `json:"start_ms,omitempty"`
-	EndMs      int64          `json:"end_ms,omitempty"`
-	Children   []string       `json:"children,omitempty"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
+	SpanID    string         `json:"span_id"`
+	ParentID  string         `json:"parent_id,omitempty"`
+	RunID     string         `json:"run_id"`
+	Kind      SpanKind       `json:"kind"`
+	Label     string         `json:"label"`
+	Step      int            `json:"step,omitempty"`
+	Input     interface{}    `json:"input,omitempty"`
+	Output    interface{}    `json:"output,omitempty"`
+	Error     string         `json:"error,omitempty"`
+	LatencyMs int64          `json:"latency_ms,omitempty"`
+	CostUSD   float64        `json:"cost_usd,omitempty"`
+	StartMs   int64          `json:"start_ms,omitempty"`
+	EndMs     int64          `json:"end_ms,omitempty"`
+	Children  []string       `json:"children,omitempty"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
 // Tracer accumulates spans for a run, keyed by RunID. Thread-safe.

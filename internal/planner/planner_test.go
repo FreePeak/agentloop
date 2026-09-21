@@ -144,8 +144,8 @@ func TestParallelPhases_LinearChain(t *testing.T) {
 
 func TestParallelPhases_IndependentSteps(t *testing.T) {
 	plan := &planner.Plan{
-		Goal:  "independent",
-		Tier:  "tiny",
+		Goal: "independent",
+		Tier: "tiny",
 		Steps: []planner.PlanStep{
 			{Index: 0, Dependencies: nil},
 			{Index: 1, Dependencies: nil},

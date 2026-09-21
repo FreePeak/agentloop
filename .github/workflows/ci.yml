@@ -1,0 +1,83 @@
+name: ci
+
+# The check that makes "all green" mean something. Before this workflow the
+# only thing that ran on a pull request was the gitStream app, which reports
+# `skipping` — every "tests pass" claim meant a human ran `go test ./...`
+# (issue #27).
+#
+# Two jobs, both required by branch protection:
+#   build-test  the code: format, vet, test, lint
+#   prd         the document: docs/check-prd.py asserts the PRD's own promises,
+#               and --selftest proves the check can still fail
+#
+# Keep the Go version in step with go.mod; `go-version-file` reads it, so
+# there is one source of truth rather than two.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Formatting first: it is the cheapest failure and the most annoying to
+      # discover after review.
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l ./cmd ./internal)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./... -count=1
+
+      - name: lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.1.6
+
+  # The PRD is a build artifact of this project, so a broken one fails the same
+  # way broken code does. `--selftest` matters as much as the check itself: it
+  # asserts the checker can still fail, which is what stops it rotting into a
+  # script that always prints OK.
+  prd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: PRD asserts its own promises
+        run: python3 docs/check-prd.py
+
+      - name: the check can still fail
+        run: python3 docs/check-prd.py --selftest

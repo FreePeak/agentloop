@@ -1,0 +1,42 @@
+# golangci-lint config — pinned so CI and a local `make lint` agree.
+#
+# v2 schema. The default linter set is kept and only two things are changed,
+# both stated rather than implied:
+#
+#   * errcheck is excluded in _test.go. An unchecked `defer resp.Body.Close()`
+#     or `json.NewDecoder(...).Decode(...)` in a test is conventional and its
+#     failure mode is a test that fails anyway; requiring `_ =` on every one
+#     adds noise without adding signal. Production code is NOT excluded — those
+#     were fixed instead (see PR #30).
+#   * a handful of style checks that fight the codebase's existing shape are
+#     off, each with the reason inline. Nothing here turns off a correctness
+#     check.
+version: "2"
+
+linters:
+  default: standard
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+    rules:
+      # Tests: an unchecked Close/Decode is conventional there.
+      - path: _test\.go
+        linters:
+          - errcheck
+      # §-heavy prose in doc comments (PRD citations) trips nothing here on
+      # purpose; the PRD's own checker owns that surface.
+      - path: \.go
+        text: "comment on exported"
+        linters:
+          - revive
+
+formatters:
+  enable:
+    - gofmt
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

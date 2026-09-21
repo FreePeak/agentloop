@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/FreePeak/agentloop/internal/budget"
-	"github.com/FreePeak/agentloop/internal/tools"
 	"github.com/FreePeak/agentloop/internal/planner"
+	"github.com/FreePeak/agentloop/internal/tools"
 )
 
 // fakeRegistry is a test double implementing tools.ToolRegistry.

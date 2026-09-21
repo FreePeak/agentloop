@@ -13,7 +13,7 @@ PORT    ?= 8081
 
 GO      ?= go
 
-.PHONY: help build run test lint vet fmt tidy prd check smoke clean
+.PHONY: help build run test lint vet fmt fmt-check tidy prd check smoke clean
 
 help: ## list the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -28,10 +28,16 @@ run: build ## run the server on $(PORT)
 test: ## run the test suite
 	$(GO) test ./...
 
-check: test lint ## tests + lint — run this before opening a PR
+check: fmt-check vet test lint prd ## everything CI runs — run this before opening a PR
 
-lint: ## golangci-lint
-	golangci-lint run ./...
+fmt-check: ## fail if any file is not gofmt-clean (what CI's gofmt step does)
+	@unformatted="$$(gofmt -l ./cmd ./internal)"; \
+	if [ -n "$$unformatted" ]; then \
+		echo "not gofmt-clean:"; echo "$$unformatted"; exit 1; \
+	fi
+
+lint: ## golangci-lint (config pinned in .golangci.yml; same scope as CI)
+	golangci-lint run ./cmd/... ./internal/...
 
 vet: ## go vet
 	$(GO) vet ./...

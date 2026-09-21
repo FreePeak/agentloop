@@ -67,19 +67,24 @@ steps are listed at the end.
 make            # list targets
 make build      # -> ./agentloop (gitignored)
 make run        # builds, then serves on :8081
-make check      # tests + lint, before a PR
+make check      # everything CI runs, before a PR
 make prd        # the PRD asserts its own promises (12 properties)
 ```
+
+CI (`.github/workflows/ci.yml`) runs `gofmt`, `go build`, `go vet`, `go test`, `golangci-lint` and `docs/check-prd.py --selftest` on every pull request, so a green check is the evidence — not a claim in a PR description.
+
+> **The workflow needs Actions minutes on the org.** In a private repo, GitHub-hosted runners are billed; if the org's spending limit is not raised the job fails at dispatch with *"The job was not started because recent account payments have failed or your spending limit needs to be increased"* — a red check that says nothing about the code. Either raise the limit, or run the identical steps locally with `make check`.
 
 | Target | What it does |
 |---|---|
 | `build` | `go build -o agentloop ./cmd/agentloop` |
 | `run` | builds, then runs with `AGENTLOOP_PORT=$(PORT)` (default 8081) |
 | `test` | `go test ./...` |
-| `check` | `test` + `lint` |
-| `lint` / `vet` / `fmt` | `golangci-lint` / `go vet` / `go fmt` |
+| `check` | `fmt-check` + `vet` + `test` + `lint` + `prd` — exactly what CI runs |
+| `fmt-check` | fails on any file `gofmt -l ./cmd ./internal` disagrees with |
+| `lint` / `vet` / `fmt` | `golangci-lint` (`.golangci.yml`) / `go vet` / `go fmt` |
 | `tidy` | `go mod tidy` |
-| `prd` | `python3 docs/check-prd.py` |
+| `prd` | `python3 docs/check-prd.py` — the PRD asserts its own promises |
 | `smoke` | submits one run and prints the response |
 | `clean` | removes the built binary |
 

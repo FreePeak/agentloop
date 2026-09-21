@@ -30,10 +30,17 @@ const (
 	// CompressRatio is the target size of a compressed bullet relative
 	// to the items it replaced (book range 20–40%; we pick 25%).
 	CompressRatio = 0.25
-	// maxLandmarkTokens is the 20% category budget for landmarks.
-	maxLandmarkTokens = int(WindowTokens * 0.20)
 	// maxRetrievedTokens is the 20% category budget for retrieved facts.
 	maxRetrievedTokens = int(WindowTokens * 0.20)
+	// There is deliberately no maxLandmarkTokens: the landmark tier is never
+	// evicted (P32 — "keep decisions verbatim"), so a budget for it would be
+	// a threshold no code could honour. Landmark growth is capped upstream
+	// by the promotion signals in Add(), not by trimming here.
+	//
+	// What this costs: a run that promotes many landmarks can hold the
+	// ceiling open, since enforceCeiling() evicts working entries only and
+	// stops when they run out. The 70% rule is therefore a working-tier
+	// guarantee, not a whole-store one — stated in docs/PRD.md §9.1.
 )
 
 // Tier names the four memory tiers (design.md §6 table).
@@ -49,10 +56,10 @@ const (
 // Item is one memory entry. Tokens is the entry's estimated weight in
 // the context window. Landmark items are never evicted (P32).
 type Item struct {
-	Tier      Tier   `json:"tier"`
-	Data      string `json:"data"`
-	Tokens    int    `json:"tokens"`
-	IsLandmark bool  `json:"is_landmark"`
+	Tier       Tier   `json:"tier"`
+	Data       string `json:"data"`
+	Tokens     int    `json:"tokens"`
+	IsLandmark bool   `json:"is_landmark"`
 }
 
 // Store is the memory for one run. Budgets are enforced per write, so
@@ -149,8 +156,9 @@ func (s *Store) enforceCeiling() {
 	ceiling := int(float64(WindowTokens) * ContextCeiling)
 	for s.UsedTokens() > ceiling {
 		if len(s.working) == 0 {
-			// Only landmarks remain; their cap makes this unreachable
-			// in practice, but stop rather than evict a landmark.
+			// Only landmarks remain. Landmarks are never evicted (P32), so
+			// the loop stops here; LandmarkBudget below is what surfaces
+			// that they are the reason the ceiling cannot be met.
 			break
 		}
 		idx := 0

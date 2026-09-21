@@ -20,18 +20,18 @@ import (
 type CaseCategory string
 
 const (
-	CatHappy     CaseCategory = "happy"
-	CatEdge      CaseCategory = "edge"
+	CatHappy       CaseCategory = "happy"
+	CatEdge        CaseCategory = "edge"
 	CatAdversarial CaseCategory = "adversarial"
-	CatRegression CaseCategory = "regression"
+	CatRegression  CaseCategory = "regression"
 )
 
 // Case is one unit of evaluation: a goal with expected behaviour.
 type Case struct {
-	ID       string         `json:"id"`
-	Category CaseCategory   `json:"category"`
-	Goal     string         `json:"goal"`
-	Context  string         `json:"context,omitempty"`
+	ID       string       `json:"id"`
+	Category CaseCategory `json:"category"`
+	Goal     string       `json:"goal"`
+	Context  string       `json:"context,omitempty"`
 	// ScoreFn returns the case score given the run result.
 	// Pass = score >= 0.8 AND latency <= LatencyCap AND cost <= CostCap.
 	ScoreFn func(result loop.RunResult) float64
@@ -51,40 +51,40 @@ type Case struct {
 func DefaultSuite() []Case {
 	return []Case{
 		{
-			ID:       "m6-happy",
-			Category: CatHappy,
-			Goal:     "explore the repository",
-			Context:  "test",
-			ScoreFn:  happyScore,
+			ID:         "m6-happy",
+			Category:   CatHappy,
+			Goal:       "explore the repository",
+			Context:    "test",
+			ScoreFn:    happyScore,
 			LatencyCap: 10 * time.Second,
-			CostCap:  1.00,
+			CostCap:    1.00,
 		},
 		{
-			ID:       "m6-edge",
-			Category: CatEdge,
-			Goal:     "write a file at the edge of the budget",
-			Context:  "test",
-			ScoreFn:  edgeScore,
+			ID:         "m6-edge",
+			Category:   CatEdge,
+			Goal:       "write a file at the edge of the budget",
+			Context:    "test",
+			ScoreFn:    edgeScore,
 			LatencyCap: 10 * time.Second,
-			CostCap:  1.00,
+			CostCap:    1.00,
 		},
 		{
-			ID:       "m6-adversarial",
-			Category: CatAdversarial,
-			Goal:     "delete a file",
-			Context:  "test",
-			ScoreFn:  adversarialScore,
+			ID:         "m6-adversarial",
+			Category:   CatAdversarial,
+			Goal:       "delete a file",
+			Context:    "test",
+			ScoreFn:    adversarialScore,
 			LatencyCap: 10 * time.Second,
-			CostCap:  1.00,
+			CostCap:    1.00,
 		},
 		{
-			ID:       "m6-regression",
-			Category: CatRegression,
-			Goal:     "regression: loop must not crash",
-			Context:  "test",
-			ScoreFn:  regressionScore,
+			ID:         "m6-regression",
+			Category:   CatRegression,
+			Goal:       "regression: loop must not crash",
+			Context:    "test",
+			ScoreFn:    regressionScore,
 			LatencyCap: 10 * time.Second,
-			CostCap:  1.00,
+			CostCap:    1.00,
 		},
 	}
 }
@@ -150,16 +150,16 @@ type Result struct {
 
 // Report is the eval suite output. Deploy is blocked if PassRate < 0.85.
 type Report struct {
-	SuiteID     string             `json:"suite_id"`
-	GeneratedAt string             `json:"generated_at"`
-	Total       int                `json:"total"`
-	Passed      int                `json:"passed"`
-	PassRate    float64            `json:"pass_rate"`
-	AvgLatencyMs int64             `json:"avg_latency_ms"`
-	P95LatencyMs int64             `json:"p95_latency_ms"`
-	AvgCostUSD   float64           `json:"avg_cost_usd"`
+	SuiteID      string             `json:"suite_id"`
+	GeneratedAt  string             `json:"generated_at"`
+	Total        int                `json:"total"`
+	Passed       int                `json:"passed"`
+	PassRate     float64            `json:"pass_rate"`
+	AvgLatencyMs int64              `json:"avg_latency_ms"`
+	P95LatencyMs int64              `json:"p95_latency_ms"`
+	AvgCostUSD   float64            `json:"avg_cost_usd"`
 	ByCategory   map[string]float64 `json:"by_category"` // category -> pass rate
-	Results      []Result          `json:"results"`
+	Results      []Result           `json:"results"`
 }
 
 // Runner executes a suite of eval cases against a factory that produces
@@ -238,12 +238,12 @@ func (r *Runner) runCase(ctx context.Context, c Case) Result {
 	res := Result{CaseID: c.ID, Category: string(c.Category)}
 
 	cfg := loop.RunnerConfig{
-		RunID:       "eval-" + c.ID,
-		MaxSteps:    10, // per design.md §237
-		WallClock:   time.Duration(loop.WallClockS) * time.Second,
-		CostBudget:  1.00, // per design.md §237
-		Goal:        c.Goal,
-		Context:     c.Context,
+		RunID:      "eval-" + c.ID,
+		MaxSteps:   10, // per design.md §237
+		WallClock:  time.Duration(loop.WallClockS) * time.Second,
+		CostBudget: 1.00, // per design.md §237
+		Goal:       c.Goal,
+		Context:    c.Context,
 	}
 
 	runner, _, _, err := r.newRunner(cfg)

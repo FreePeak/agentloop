@@ -15,13 +15,13 @@ import (
 // TestResumeFromCheckpoint_FaultAtStep7 is M4 acceptance #2 from PRD §13:
 // resume from a step-5 checkpoint after a step-7 fault.
 //
-// 1. First run: deterministic tool picker that PANICS (faults) the
-//    first time step 7 is selected. A durable checkpoint at step 5
-//    must survive the crash.
-// 2. Second run (same runID, same store): the runner restores the
-//    step-5 checkpoint and continues from step 5 — it must NOT
-//    re-fire the restored steps 0-4 (dedup map restored) and
-//    must hold the 70% rule.
+//  1. First run: deterministic tool picker that PANICS (faults) the
+//     first time step 7 is selected. A durable checkpoint at step 5
+//     must survive the crash.
+//  2. Second run (same runID, same store): the runner restores the
+//     step-5 checkpoint and continues from step 5 — it must NOT
+//     re-fire the restored steps 0-4 (dedup map restored) and
+//     must hold the 70% rule.
 func TestResumeFromCheckpoint_FaultAtStep7(t *testing.T) {
 	dir := t.TempDir()
 	cp, err := store.Open(dir + "/checkpoints.db")

@@ -41,14 +41,14 @@ const (
 //     ponytail: no preview and no real confidence exists yet, so the writer
 //     stays held; move it to CatConfirm when either one does.
 func Categorize(tool string) Category {
-	switch {
-	case tool == "read", tool == "search", tool == "list", tool == "get",
-		tool == "query", tool == "web_search", tool == "run_tests":
+	switch tool {
+	case "read", "search", "list", "get",
+		"query", "web_search", "run_tests":
 		return CatAuto
-	case tool == "update", tool == "edit", tool == "patch", tool == "write":
+	case "update", "edit", "patch", "write":
 		return CatConfirm
-	case tool == "delete", tool == "send", tool == "deploy", tool == "pay",
-		tool == "write_file":
+	case "delete", "send", "deploy", "pay",
+		"write_file":
 		return CatApprove
 	default:
 		return CatApprove // fail closed
@@ -57,7 +57,7 @@ func Categorize(tool string) Category {
 
 // Decision is the outcome of one gate check.
 type Decision struct {
-	Action    string    `json:"action"`    // approve | deny
+	Action    string    `json:"action"` // approve | deny
 	Category  Category  `json:"category"`
 	Reason    string    `json:"reason"`
 	Timestamp time.Time `json:"timestamp"`
@@ -86,13 +86,13 @@ type ApprovalRecord struct {
 // Timeout: how long a request may sit unapproved before DENY.
 // MinConfidence: below this, confirm-category is held.
 type ApprovalGate struct {
-	mu              sync.Mutex
-	Timeout         time.Duration
-	MinConfidence   float64
-	ledger          []ApprovalRecord
-	timeNow         func() time.Time // overridable for tests
+	mu               sync.Mutex
+	Timeout          time.Duration
+	MinConfidence    float64
+	ledger           []ApprovalRecord
+	timeNow          func() time.Time    // overridable for tests
 	pendingDecisions map[string]Decision // runID:step → pending approve
-	approvedKeys    map[string]bool      // runID:step → operator approved (resume path)
+	approvedKeys     map[string]bool     // runID:step → operator approved (resume path)
 }
 
 // NewApprovalGate returns a gate with M5 defaults:
@@ -117,10 +117,11 @@ func (req ApprovalRequest) Key() string {
 // labelled reason. The timeout DENIES (M5 acceptance).
 //
 // Policy (P30):
-//   auto → approve immediately (read → auto)
-//   confirm → approve if confidence >= MinConfidence, else deny
-//   approve → hold pending (never auto); recorded as pending
-//     so the operator sees it in the queue
+//
+//	auto → approve immediately (read → auto)
+//	confirm → approve if confidence >= MinConfidence, else deny
+//	approve → hold pending (never auto); recorded as pending
+//	  so the operator sees it in the queue
 func (g *ApprovalGate) Check(req ApprovalRequest) Decision {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -134,7 +135,7 @@ func (g *ApprovalGate) Check(req ApprovalRequest) Decision {
 
 	if g.timeNow().Sub(req.Requested) > g.Timeout {
 		d := Decision{Action: "deny", Category: req.Category,
-			Reason: fmt.Sprintf("approval timeout after %s", g.Timeout),
+			Reason:    fmt.Sprintf("approval timeout after %s", g.Timeout),
 			Timestamp: g.timeNow()}
 		g.ledger = append(g.ledger, ApprovalRecord{req, d})
 		delete(g.pendingDecisions, req.Key())
@@ -144,20 +145,20 @@ func (g *ApprovalGate) Check(req ApprovalRequest) Decision {
 	switch req.Category {
 	case CatAuto:
 		d := Decision{Action: "approve", Category: CatAuto,
-			Reason: "read-category: auto-approved (P30 read→auto)",
+			Reason:    "read-category: auto-approved (P30 read→auto)",
 			Timestamp: g.timeNow()}
 		g.ledger = append(g.ledger, ApprovalRecord{req, d})
 		return d
 	case CatConfirm:
 		if req.Confidence >= g.MinConfidence {
 			d := Decision{Action: "approve", Category: CatConfirm,
-				Reason: fmt.Sprintf("confirm: confidence %.2f >= floor %.2f", req.Confidence, g.MinConfidence),
+				Reason:    fmt.Sprintf("confirm: confidence %.2f >= floor %.2f", req.Confidence, g.MinConfidence),
 				Timestamp: g.timeNow()}
 			g.ledger = append(g.ledger, ApprovalRecord{req, d})
 			return d
 		}
 		d := Decision{Action: "deny", Category: CatConfirm,
-			Reason: fmt.Sprintf("confirm: confidence %.2f < floor %.2f", req.Confidence, g.MinConfidence),
+			Reason:    fmt.Sprintf("confirm: confidence %.2f < floor %.2f", req.Confidence, g.MinConfidence),
 			Timestamp: g.timeNow()}
 		g.ledger = append(g.ledger, ApprovalRecord{req, d})
 		return d
@@ -169,7 +170,7 @@ func (g *ApprovalGate) Check(req ApprovalRequest) Decision {
 		// resume gap).
 		if g.approvedKeys[req.Key()] {
 			d := Decision{Action: "approve", Category: CatApprove,
-				Reason: "operator approved (resume re-check)",
+				Reason:    "operator approved (resume re-check)",
 				Timestamp: g.timeNow()}
 			g.ledger = append(g.ledger, ApprovalRecord{req, d})
 			delete(g.pendingDecisions, req.Key())
@@ -177,14 +178,14 @@ func (g *ApprovalGate) Check(req ApprovalRequest) Decision {
 		}
 		// Hold pending; operator decides via Server.approve.
 		d := Decision{Action: "deny", Category: CatApprove,
-			Reason: "high-impact: approval required (P30 always_approve)",
+			Reason:    "high-impact: approval required (P30 always_approve)",
 			Timestamp: g.timeNow()}
 		g.ledger = append(g.ledger, ApprovalRecord{req, d})
 		g.pendingDecisions[req.Key()] = d
 		return d
 	default:
 		d := Decision{Action: "deny", Category: req.Category,
-			Reason: "unknown category — fail closed",
+			Reason:    "unknown category — fail closed",
 			Timestamp: g.timeNow()}
 		g.ledger = append(g.ledger, ApprovalRecord{req, d})
 		return d
