@@ -38,7 +38,8 @@ Read this before you plan work around it. As of this writing:
 | HTTP API, admin console, eval harness | **implemented** |
 | Model calls to onegw | **partial** — one outbound call, at synthesis (§2, §9). The loop's *planning* still makes none |
 | The four built-in tools | **three real, one stub** — `query` reaches LeanKG; `run_tests` and `write_file` each run as one **xdev turn** in a sandboxed workspace (so the loop can actually write and verify); `web_search` still returns a canned result whose message says `stub` |
-| The planner | **deterministic**, no model calls; model-driven planning is the documented production path |
+| The step chooser | **model-driven when a gateway is wired** (`AGENTLOOP_ONEGW_URL`): one call per step, given the previous result, answering `{tool,args,why,done}`. With no gateway it falls back to the deterministic rotation and each step says which happened in its `why` |
+| The planner | **deterministic**, no model calls — it frames the phases; the *chooser* picks the action |
 | M7 multi-agent (`internal/supervisor`) | **gated shut** by design — refused unless one of [PRD §10](PRD.md#10-multi-agent-stance)'s four conditions is met |
 
 **What this means:** a run today exercises the real loop, budget, gate, and
@@ -105,6 +106,8 @@ Deployment facts, not compiled defaults:
 | `AGENTLOOP_XDEV_BIN` | `xdev` | the sandbox binary; agentloop speaks its `rpc` JSONL protocol |
 | `AGENTLOOP_XDEV_DIR` | a fresh temp dir | the workspace `write_file`/`run_tests` turns run in |
 | `AGENTLOOP_XDEV_OFF` | *(unset)* | any value disables the sandbox; those two tools then report no executor |
+| `AGENTLOOP_ONEGW_URL` | `http://127.0.0.1:8080` | gateway; when reachable, the model **chooses each step** |
+| `AGENTLOOP_ONEGW_COMBO` | `dev` | combo used as the wire `model` for both step choice and synthesis |
 
 Take the onegw key from `onegw.toml`'s `[auth] [[auth.keys]]`; the combo must
 exist there too, since the client sends whatever name you give it and onegw
@@ -319,6 +322,12 @@ Stated plainly, so nobody discovers it the hard way:
   *calls the endpoint* — the gate is "the suite's tests are green", not "the
   deploy was blocked by a pass rate", and wiring those together is the M6
   follow-through.
+- **The step chooser is real. The planner is not.** `internal/loop/reason.go`
+  asks the model once per step, shows it the previous step's verbatim result,
+  and runs what it answers. What is still deterministic is the *planning*: the
+  phases and instructions come from a rule table (`planStepCount` on the goal's
+  word count), so the loop decides **what to do next** but not **how to break
+  the goal up**. In practice the chooser carries the run, and the plan is a hint.
 - **Tier routing is half-wired** — see §6.
 - **M7 is gated shut**, correctly: the gate is a measurement, not a milestone,
   and it opens only when a [PRD §10](PRD.md#10-multi-agent-stance) condition is
