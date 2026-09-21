@@ -57,6 +57,13 @@ type RunResult struct {
 	SpendUSD         float64      `json:"spend_usd"`
 	CurrentTier      string       `json:"current_tier"`
 	Steps            []StepRecord `json:"steps"`
+	// M8: what the model transport did for this run. Tokens observed
+	// from onegw's usage report; the leg that answered (not the combo
+	// we asked for); and, if synthesis failed, why — the deterministic
+	// partial is still returned in that case.
+	Usage          TokenUsage `json:"usage,omitempty"`
+	AnsweredBy     string     `json:"answered_by,omitempty"`
+	SynthesisError string     `json:"synthesis_error,omitempty"`
 }
 
 // RunnerConfig holds the tunables for a single run.
@@ -70,6 +77,7 @@ type RunnerConfig struct {
 	ConfidenceFloor     float64
 	EscalationThreshold float64
 	Gate                *ApprovalGate // M5: fail-closed HITL gate (nil = bypass, tests)
+	Model               ModelClient   // M8: outbound model transport (nil = deterministic synthesis only)
 }
 
 // LoopRunner runs one bounded agent loop. Ceilings are enforced
@@ -98,6 +106,7 @@ type LoopRunner struct {
 	planner             *planner.Planner                                // optional: drives tool selection (M3)
 	plan                *planner.Plan                                   // current plan (M3)
 	gate                *ApprovalGate                                   // M5: fail-closed HITL gate (nil = bypass, tests)
+	model               ModelClient                                     // M8: outbound model transport (nil = deterministic synthesis)
 	guardrailScreen     func(string, any) (map[string]float64, float64) // M2.x: TypeSafe screen
 	pausedStep          int                                             // step held at paused_approval (M5)
 	lastResult          RunResult                                       // partial result at pause (M5 resume)
@@ -210,6 +219,7 @@ func newRunner(cfg RunnerConfig, guard *budget.Guard, reg tools.ToolRegistry,
 		planner:         planner,
 		checkpointStore: cps,
 		gate:            gate,
+		model:           cfg.Model,
 		pausedStep:      -1,
 		lastResult:      RunResult{},
 	}
@@ -322,7 +332,7 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 		select {
 		case <-r.killCh:
 			result.State = StateKilled
-			result.PartialSynthesis = synthesizePartial(result.Steps)
+			_ = r.synthesize(ctx, &result)
 			r.tracer.StartSpan(r.cfg.RunID, r.cfg.RunID+"-kill", r.cfg.RunID, tracer.SpanSystem, "kill", step+1)
 			r.tracer.EndSpan(r.cfg.RunID+"-kill", nil, nil, 0)
 			r.endRunSpan(r.cfg.RunID, result, nil)
@@ -335,7 +345,7 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 			result.State = StateExhausted
 			result.ExitReason = ExitWallClock
 			result.Success = ptr(false)
-			result.PartialSynthesis = synthesizePartial(result.Steps)
+			_ = r.synthesize(ctx, &result)
 			r.endRunSpan(r.cfg.RunID, result, nil)
 			return result, nil
 		}
@@ -345,7 +355,7 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 			result.State = StateExhausted
 			result.ExitReason = ExitDailyBudget
 			result.Success = ptr(false)
-			result.PartialSynthesis = synthesizePartial(result.Steps)
+			_ = r.synthesize(ctx, &result)
 			r.endRunSpan(r.cfg.RunID, result, err)
 			return result, nil
 		}
@@ -356,7 +366,7 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 			result.State = StateExhausted
 			result.ExitReason = ExitConfidenceFloor
 			result.Success = ptr(false)
-			result.PartialSynthesis = synthesizePartial(result.Steps)
+			_ = r.synthesize(ctx, &result)
 			r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("confidence floor"))
 			return result, nil
 		}
@@ -366,7 +376,7 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 			result.State = StateExhausted
 			result.ExitReason = ExitCostBudget
 			result.Success = ptr(false)
-			result.PartialSynthesis = synthesizePartial(result.Steps)
+			_ = r.synthesize(ctx, &result)
 			r.tracer.StartSpan(r.cfg.RunID, r.cfg.RunID+"-budget", r.cfg.RunID, tracer.SpanSystem, "budget", step+1)
 			r.tracer.EndSpan(r.cfg.RunID+"-budget", nil, err, 0)
 			r.endRunSpan(r.cfg.RunID, result, err)
@@ -407,7 +417,7 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 				// re-checks the gate; an approved request
 				// continues the loop.
 				result.State = StatePausedApproval
-				result.PartialSynthesis = synthesizePartial(result.Steps)
+				_ = r.synthesize(ctx, &result)
 				r.pausedStep = step
 				r.lastResult = result
 				r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("approval required: %s", dec.Reason))
@@ -422,7 +432,7 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 			result.State = StateExhausted
 			result.ExitReason = ExitProgressStall
 			result.Success = ptr(false)
-			result.PartialSynthesis = synthesizePartial(result.Steps)
+			_ = r.synthesize(ctx, &result)
 			if r.cycleAlert != nil {
 				r.cycleAlert(fmt.Sprintf("cycle: tool %q repeated %d times at step %d", toolName, r.seenArgs[argsHash], step))
 			}
@@ -467,7 +477,7 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 			action := experiments.Route(nouls, sev, experiments.Strict)
 			if action == "review" {
 				result.State = StatePausedApproval
-				result.PartialSynthesis = synthesizePartial(result.Steps)
+				_ = r.synthesize(ctx, &result)
 				r.pausedStep = step
 				r.lastResult = result
 				r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("guardrail: review required"))
@@ -477,7 +487,7 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 				result.State = StateExhausted
 				result.ExitReason = ExitGuardrailBlock
 				result.Success = ptr(false)
-				result.PartialSynthesis = synthesizePartial(result.Steps)
+				_ = r.synthesize(ctx, &result)
 				r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("guardrail: blocked"))
 				return result, nil
 			}
@@ -535,7 +545,7 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 			result.State = StateExhausted
 			result.ExitReason = ExitConsecutiveFailures
 			result.Success = ptr(false)
-			result.PartialSynthesis = synthesizePartial(result.Steps)
+			_ = r.synthesize(ctx, &result)
 			r.endRunSpan(r.cfg.RunID, result, fmt.Errorf("consecutive failures"))
 			return result, nil
 		}
@@ -547,7 +557,7 @@ func (r *LoopRunner) runLoop(ctx context.Context, result RunResult) (RunResult, 
 	result.State = StateExhausted
 	result.ExitReason = ExitMaxSteps
 	result.Success = ptr(false)
-	result.PartialSynthesis = synthesizePartial(result.Steps)
+	_ = r.synthesize(ctx, &result)
 	r.lastResult = result
 	r.endRunSpan(r.cfg.RunID, result, nil)
 	return result, nil

@@ -36,7 +36,7 @@ Read this before you plan work around it. As of this writing:
 | Loop bounds, six typed exits, kill, memory, checkpoints | **implemented and tested** |
 | HITL approval gate wired into the runner | **implemented, and it holds** (PR #16 fixed a wiring bug where the gate was built but passed as `nil`). The *hold* works; approval is recorded but does **not** resume the run — §3, §9 |
 | HTTP API, admin console, eval harness | **implemented** |
-| Model calls to onegw | **not yet** — there is no outbound client in the loop path |
+| Model calls to onegw | **partial** — one outbound call, at synthesis (§2, §9). The loop's *planning* still makes none |
 | The four built-in tools | **stubs** — each returns a canned `Success: true` (`internal/tools/registry_impl.go:44`) |
 | The planner | **deterministic**, no model calls; model-driven planning is the documented production path |
 | M7 multi-agent (`internal/supervisor`) | **gated shut** by design — refused unless one of [PRD §10](PRD.md#10-multi-agent-stance)'s four conditions is met |
@@ -80,6 +80,29 @@ make prd        # the PRD asserts its own promises (12 properties)
 | `clean` | removes the built binary |
 
 Override the port: `make run PORT=9090`.
+
+### The gateway (M8)
+
+The loop reaches onegw through three environment variables. They are
+deployment facts, so they are not in the binary:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AGENTLOOP_ONEGW_URL` | `http://127.0.0.1:8080` | gateway base URL |
+| `AGENTLOOP_ONEGW_KEY` | *(empty)* | bearer key; empty sends **no** `Authorization` header |
+| `AGENTLOOP_ONEGW_COMBO` | `dev` | combo name, used as the wire `model` |
+
+Take the key from `onegw.toml`'s `[auth] [[auth.keys]]` and pass it as
+`AGENTLOOP_ONEGW_KEY`.
+
+The combo must exist in `onegw.toml`; the client sends whatever name you give
+it and onegw rejects an unknown one. **The port clash is yours to handle:**
+onegw owns `127.0.0.1:8080`, so leave `AGENTLOOP_ONEGW_URL` alone and change
+`PORT` instead.
+
+If the gateway is unreachable or rejects the key, a run still completes: the
+synthesis call is the only model call, and it falls back to the deterministic
+partial, recording the failure in the run's `synthesis_error` field.
 
 ## 3. A first run, end to end
 
@@ -259,35 +282,30 @@ Package map:
 
 Stated plainly, so nobody discovers it the hard way:
 
-- **Approving does not resume a run.** The gate holds correctly, and the resume
-  machinery exists (`prepareResume`, `internal/loop/m4.go:36`, called at
-  `internal/loop/runner.go:268`) — but nothing connects an approval back to it.
-  `Run()` returns when it holds (`runner.go:365`) and neither approval handler
-  re-invokes it (`cmd/agentloop/main.go:197`, `:211`). `Check` also never
-  consults an earlier approval: `CatApprove` records `deny` and holds on every
-  pass (`internal/loop/approval.go:144`). Since all five built-in tool names are
-  approve-category, a gated run therefore **cannot** make progress. This is the
-  largest functional gap: HITL today is an audit record, not a gate you can pass
-  through.
-- **No outbound model client.** The loop never calls onegw. Everything above
-  runs against stubbed tools and a deterministic planner.
+- **Approval holds, and now resumes.** Both approval handlers call
+  `runner.Resume` after `gate.Approve` returns true, so an approved step
+  re-enters the loop from the checkpoint (`cmd/agentloop/main.go:245`, `:270`).
+  What is still narrow: `Categorize` matches only literal read-ish names
+  (`internal/loop/approval.go:27`), and none of the four v1 tool names match —
+  so *every* tool call fail-closes to `CatApprove`. A plain read-only `query`
+  step holds until an operator approves it.
+- **Synthesis is the only model call.** The loop now reaches onegw — once, at
+  the end of a bound run, through `internal/onegw`. Planning does **not**: the
+  planner is still the deterministic rule table, so a run's *steps* are chosen
+  without a model. A deploy with no gateway reachable behaves exactly as
+  before, because the deterministic partial remains the fallback.
 - **The four tools are stubs.** `query` should reach LeanKG `POST /api/v1/query`;
   `run_tests`/`write_file` should go through xdev rpc in a restricted workspace.
-- **The kill endpoint does not reach a live run.** `POST /v1/runs/{id}/kill`
-  rewrites the stored state to `killed` (`cmd/agentloop/main.go:114` sets
-  `result.State = StateKilled`, `:128` writes it back), but the handler never
-  calls `runner.Kill()`. That method sits unused by the service
-  (`internal/loop/runner.go:235`) even though `Run()` checks the kill channel at
-  every step boundary (`runner.go:280`). The stop is real for a run that has
-  already returned — as every gated run has, since all five tools are
-  approve-category — and cosmetic for one still working: the operator sees
-  `killed` while the loop keeps going and overwrites the state on completion.
+- **The kill endpoint reaches a live run.** `POST /v1/runs/{id}/kill` stamps the
+  stored state *and* signals the runner (`cmd/agentloop/main.go:167`, `:367`),
+  which checks the channel at every step boundary. The stop is bounded by one
+  step, not instant: a step already in flight runs to completion first.
 - **Tier routing is half-wired** — see §6.
 - **M7 is gated shut**, correctly: the gate is a measurement, not a milestone,
   and it opens only when a [PRD §10](PRD.md#10-multi-agent-stance) condition is
   actually met.
 
-In rough order: **the approval→resume path** (make `Check` honor an existing
-approval, then re-enter the loop from the checkpoint), **the kill endpoint**
-(call `runner.Kill()` so a working run stops at its next step boundary), a real
-onegw client and tier propagation, then LeanKG-backed retrieval, then xdev-rpc execution.
+In rough order: **a real LeanKG `query` client** (the tool is still a stub), a
+**model-driven planner** (the one call the loop makes today is the synthesis),
+then xdev-rpc execution for `run_tests`/`write_file`, and with it the tier
+propagation of §6.
