@@ -182,7 +182,7 @@ Requests accept `goal` (required), `context`, `max_steps`, and `cost_budget`.
 | `POST` | `/v1/runs/{id}/approvals/{step_id}` | approve by path |
 |---|---|---|
 | `GET` | `/admin/api/v1/runs` | all runs as JSON |
-| `GET` | `/admin/api/v1/evals` | eval report |
+| `GET` | `/admin/api/v1/evals` | eval report — the M6 deploy gate, now passing 4/4 (see §9) |
 | `GET` | `/admin/console/runs` | HTML run console |
 | `GET` | `/admin/console/approvals` | HTML approvals console |
 | `POST` | `/admin/console/kill` | kill by body `{"run_id":"…"}` |
@@ -303,6 +303,12 @@ Stated plainly, so nobody discovers it the hard way:
   tool then says no knowledge service is configured. A LeanKG that is *down* is
   an observation, not a crash: the step records the reason and the run keeps its
   bounds.
+- **The eval gate passes, and nothing runs it automatically.** `GET
+  /admin/api/v1/evals` reports 4/4 against the runner the service builds; the
+  suite is also asserted by `TestEval_DefaultSuiteIsGreen` in CI. But no CI step
+  *calls the endpoint* — the gate is "the suite's tests are green", not "the
+  deploy was blocked by a pass rate", and wiring those together is the M6
+  follow-through.
 - **Tier routing is half-wired** — see §6.
 - **M7 is gated shut**, correctly: the gate is a measurement, not a milestone,
   and it opens only when a [PRD §10](PRD.md#10-multi-agent-stance) condition is

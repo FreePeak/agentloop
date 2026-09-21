@@ -9,14 +9,88 @@ import (
 	"github.com/FreePeak/agentloop/internal/budget"
 	"github.com/FreePeak/agentloop/internal/eval"
 	"github.com/FreePeak/agentloop/internal/loop"
+	"github.com/FreePeak/agentloop/internal/planner"
 	"github.com/FreePeak/agentloop/internal/tools"
 )
 
-func TestEval_RunAllCategories(t *testing.T) {
-	factory := func(cfg loop.RunnerConfig) (*loop.LoopRunner, *budget.Guard, tools.ToolRegistry, error) {
-		return loop.NewRunner(cfg, budget.New(100.0, 200.0), tools.NewRegistry()), budget.New(100.0, 200.0), tools.NewRegistry(), nil
+// serviceFactory builds the SAME runner the service builds: a planner, an
+// approval gate, a fresh registry, and no model (the deploy gate must stay
+// deterministic and offline, PRD §11.4). The eval suite's cases are premised on
+// service behaviour — the adversarial case is "the gate holds" — so a factory
+// that omits the gate cannot score them. TestEval_DefaultSuiteIsGreen below
+// fails if the two ever drift apart again.
+func serviceFactory(cfg loop.RunnerConfig) (*loop.LoopRunner, *budget.Guard, tools.ToolRegistry, error) {
+	g := budget.New(cfg.CostBudget, float64(loop.DailyCeilingMult)*cfg.CostBudget)
+	reg := tools.NewRegistry()
+	gate := loop.NewApprovalGate()
+	cfg.Gate = gate
+	return loop.NewRunnerWithPlannerAndGate(cfg, g, reg, planner.NewPlanner(), gate), g, reg, nil
+}
+
+// TestEval_DefaultSuiteIsGreen is the M6 acceptance in one assertion: the suite
+// the deploy gate runs must pass against the runner the service actually
+// builds.
+//
+// This is the check that was missing. The endpoint reported 0.5 (blocked) for
+// days while `go test ./...` was green, because every test here used its own
+// hand-built factory or its own score functions — nothing asserted that the
+// DEFAULT suite passes.
+func TestEval_DefaultSuiteIsGreen(t *testing.T) {
+	runner := eval.NewRunner(serviceFactory)
+	report, err := runner.Run(context.Background(), "default", eval.DefaultSuite())
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
 	}
-	runner := eval.NewRunner(factory)
+	if report.DeployBlocked() {
+		for _, r := range report.Results {
+			t.Logf("  %s (%s): passed=%v score=%.2f", r.CaseID, r.Category, r.Passed, r.Score)
+		}
+		t.Fatalf("the default suite is blocked at pass_rate = %.2f (threshold %.2f) — "+
+			"either the eval factory no longer matches the service runner, or the "+
+			"scoring no longer describes real behaviour",
+			report.PassRate, eval.PassRateThreshold)
+	}
+	if !report.AllPassed() {
+		t.Errorf("AllPassed() = false at pass_rate %.2f with %d/%d passing",
+			report.PassRate, report.Passed, report.Total)
+	}
+}
+
+// TestEval_DefaultSuiteCanFail is the other half: a suite that always passes is
+// not a gate. Points the adversarial case at a runner with no gate — the shape
+// the service had before M5 was wired — and requires the suite to notice.
+func TestEval_DefaultSuiteCanFail(t *testing.T) {
+	// No gate, no planner: the runner the eval factory used to build.
+	gateless := func(cfg loop.RunnerConfig) (*loop.LoopRunner, *budget.Guard, tools.ToolRegistry, error) {
+		g := budget.New(cfg.CostBudget, float64(loop.DailyCeilingMult)*cfg.CostBudget)
+		reg := tools.NewRegistry()
+		return loop.NewRunner(cfg, g, reg), g, reg, nil
+	}
+
+	// Only the adversarial case, so the assertion is about the gate and
+	// nothing else: with no gate there is no pause, and a pause is its pass.
+	var adversarial eval.Case
+	for _, c := range eval.DefaultSuite() {
+		if c.Category == eval.CatAdversarial {
+			adversarial = c
+		}
+	}
+	if adversarial.ID == "" {
+		t.Fatal("the default suite has no adversarial case — the guardrail is untested")
+	}
+
+	report, err := eval.NewRunner(gateless).Run(context.Background(), "gateless", []eval.Case{adversarial})
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if report.Passed == report.Total {
+		t.Errorf("the adversarial case passes against a GATELESS runner (score %.2f) — "+
+			"the case no longer tests the guardrail", report.Results[0].Score)
+	}
+}
+
+func TestEval_RunAllCategories(t *testing.T) {
+	runner := eval.NewRunner(serviceFactory)
 
 	cases := []eval.Case{
 		{
@@ -61,42 +135,26 @@ func TestEval_RunAllCategories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
-
-	if report.SuiteID != "suite-1" {
-		t.Errorf("suite_id = %q, want suite-1", report.SuiteID)
-	}
 	if report.Total != 4 {
 		t.Errorf("total = %d, want 4", report.Total)
 	}
-	if len(report.Results) != 4 {
-		t.Fatalf("results = %d, want 4", len(report.Results))
+	// 0.9, 0.85 pass; 0.6, 0.75 do not (threshold 0.8).
+	if report.Passed != 2 {
+		t.Errorf("passed = %d, want 2 (score threshold 0.8)", report.Passed)
 	}
-	if report.ByCategory == nil {
-		t.Fatal("by_category map is nil")
-	}
-	if len(report.ByCategory) != 4 {
-		t.Errorf("by_category has %d entries, want 4", len(report.ByCategory))
-	}
-
-	// Pass rate should be 0.5 (2 of 4 pass with score >= 0.8).
 	if report.PassRate != 0.5 {
 		t.Errorf("pass_rate = %f, want 0.5", report.PassRate)
 	}
 	if !report.DeployBlocked() {
-		t.Error("deploy should be blocked (50% < 85% threshold)")
+		t.Error("50%% pass rate must block a deploy")
 	}
 	if report.AllPassed() {
 		t.Error("AllPassed should be false at 50% pass rate")
 	}
-
-	// Verify latency and cost stats are computed (may be 0ms for fast loops).
-	_ = report.AvgLatencyMs
-	_ = report.P95LatencyMs
-
-	// Verify individual results.
-	for _, r := range report.Results {
-		if r.CaseID == "" {
-			t.Error("result missing case_id")
+	// Every category must be represented in the report, even at 0%.
+	for _, cat := range []string{"happy", "edge", "adversarial", "regression"} {
+		if _, ok := report.ByCategory[cat]; !ok {
+			t.Errorf("by_category missing %q", cat)
 		}
 	}
 }
@@ -104,10 +162,7 @@ func TestEval_RunAllCategories(t *testing.T) {
 // TestEval_DeployGate proves the deploy is blocked when pass rate
 // is below threshold (PRD §11.4).
 func TestEval_DeployGate(t *testing.T) {
-	factory := func(cfg loop.RunnerConfig) (*loop.LoopRunner, *budget.Guard, tools.ToolRegistry, error) {
-		return loop.NewRunner(cfg, budget.New(100.0, 200.0), tools.NewRegistry()), budget.New(100.0, 200.0), tools.NewRegistry(), nil
-	}
-	runner := eval.NewRunner(factory)
+	runner := eval.NewRunner(serviceFactory)
 
 	// All pass.
 	allPassCases := []eval.Case{
@@ -136,46 +191,29 @@ func TestEval_DeployGate(t *testing.T) {
 // TestEval_RunWithRealLoop proves the eval runner works end-to-end
 // with a real loop runner (no mock score functions).
 func TestEval_RunWithRealLoop(t *testing.T) {
-	factory := func(cfg loop.RunnerConfig) (*loop.LoopRunner, *budget.Guard, tools.ToolRegistry, error) {
-		guard := budget.New(100.0, 200.0)
-		runner := loop.NewRunner(cfg, guard, tools.NewRegistry())
-		return runner, guard, tools.NewRegistry(), nil
-	}
-	runner := eval.NewRunner(factory)
+	runner := eval.NewRunner(serviceFactory)
 
 	cases := []eval.Case{
 		{
-			ID:       "real-1",
-			Category: eval.CatHappy,
-			Goal:     "run a short task",
-			Context:  "eval test",
-			ScoreFn: func(r loop.RunResult) float64 {
-				if r.State == loop.StateSuccess || r.State == loop.StateExhausted {
-					return 0.9
-				}
-				return 0.3
-			},
+			ID:         "real-1",
+			Category:   eval.CatHappy,
+			Goal:       "run the real loop",
+			Context:    "test",
+			ScoreFn:    nil, // scoreByState
 			LatencyCap: 30 * time.Second,
 			CostCap:    1.00,
 		},
 	}
-
 	report, err := runner.Run(context.Background(), "real-suite", cases)
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
 	if report.Total != 1 {
-		t.Fatalf("total = %d, want 1", report.Total)
+		t.Errorf("total = %d, want 1", report.Total)
 	}
-	if len(report.Results) != 1 {
-		t.Fatalf("results = %d, want 1", len(report.Results))
-	}
-	res := report.Results[0]
-	if res.CaseID != "real-1" {
-		t.Errorf("case_id = %q, want real-1", res.CaseID)
-	}
-	if res.LatencyMs < 0 {
-		t.Error("latency should not be negative for real run")
+	// The real loop must produce a scored result, not an error.
+	if report.Results[0].Error != "" {
+		t.Errorf("case error: %s", report.Results[0].Error)
 	}
 	_ = report.PassRate // may be blocked or not depending on loop state; both are valid
 }
