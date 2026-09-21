@@ -162,6 +162,21 @@ def check(text: str) -> list[str]:
     if "Config changes also run the paired parity comparison" not in text:
         fail.append("the parity harness behind M3's cost acceptance is not specified")
 
+    # 8b. the parity harness is not merely *specified* — §11.4 says where it
+    # lives. Scoped to the section on purpose: the filename also appears in
+    # §3.1, D9 and the footer, so an unscoped search passed while §11.4 itself
+    # named no implementation (found by --selftest, which is why it exists).
+    if "### 11.4" in text and "### 11.5" in text:
+        s114 = text[text.index("### 11.4"):text.index("### 11.5")]
+        if "internal/eval/parity.go" not in s114:
+            fail.append("§11.4 specifies the parity harness but names no implementation")
+    # D1 answers the language; without a row for the framework, the choice is
+    # invisible to a reviewer reading §15 — which is how it went undecided.
+    if not any(ln.startswith("| D9 |") for ln in text.splitlines()):
+        fail.append("no D9 row: the framework-vs-custom decision has no home in §15")
+    elif "design.md` §18" not in text[text.index("| D9 |"):text.index("| D9 |") + 700]:
+        fail.append("D9 does not cite the chooser it comes from (design.md §18)")
+
     # 9. provenance for both source sweeps is recorded
     if "QC pass (2026-09-18)" not in text:
         fail.append("the claim-verification sweep is not recorded in §16")
@@ -202,6 +217,11 @@ MUTATIONS = [
     ("the pattern ledger is renamed", "## 20. Appendix D", "## 20. Appendix Z"),
     ("the parity harness is dropped", "**Config changes also run the paired parity comparison**", "**Config changes also run a cost comparison**"),
     ("the SSE event names are dropped", "`state`, `step`, `approval`, `done`", "several event types"),
+    # Anchored on the §11.4 sentence, not the filename: the filename also
+    # appears in §3.1/D9/footer, so a first-occurrence replace left §11.4
+    # unnamed and the check still passed — a blind spot --selftest reported.
+    ("the parity implementation is unnamed", "**Implemented 2026-09-21:** `internal/eval/parity.go`", "**Implemented 2026-09-21:** the parity harness"),
+    ("D9 loses its home", "| D9 |", "| DX |"),
 ]
 
 
